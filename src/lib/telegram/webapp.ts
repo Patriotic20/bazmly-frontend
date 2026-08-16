@@ -69,3 +69,31 @@ export function bindBackButton(handler: () => void): () => void {
 export function hapticTap(): void {
   getWebApp()?.HapticFeedback.impactOccurred("light");
 }
+
+/** Why asking for a contact did not produce one. */
+export type ContactRefusal = "unsupported" | "declined";
+
+/**
+ * Ask Telegram for the user's phone number.
+ *
+ * Resolves with the signed payload to hand the backend, or with why it did not:
+ * `unsupported` when the Telegram client predates Bot API 6.9, `declined` when
+ * the user said no. Neither is an error — both are answers, and the caller shows
+ * something different for each.
+ *
+ * The signed string is passed on untouched. It is what the signature covers, so
+ * re-encoding it or picking the number out of `responseUnsafe` would throw away
+ * the only proof that Telegram, and not the page, produced this number.
+ */
+export function requestContact(): Promise<{ contactData: string } | { refused: ContactRefusal }> {
+  const webApp = getWebApp();
+  if (!webApp?.requestContact) return Promise.resolve({ refused: "unsupported" as const });
+
+  return new Promise((resolve) => {
+    webApp.requestContact!((shared, result) => {
+      const contactData = result?.response;
+      if (shared && contactData) resolve({ contactData });
+      else resolve({ refused: "declined" as const });
+    });
+  });
+}

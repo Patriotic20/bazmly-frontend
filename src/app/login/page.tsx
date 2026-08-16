@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { TelegramPhonePrompt } from "@/components/telegram-phone-prompt";
 import { useTheme } from "@/components/theme-provider";
 import {
   authKeys,
@@ -2025,6 +2026,11 @@ export default function LoginPage() {
                       Add friends
                     </button>
                   </div>
+                </div>
+
+                {/* Only inside Telegram, and only until a number is stored. */}
+                <div className="w-full">
+                  <TelegramPhonePrompt hasPhone={Boolean(phone)} />
                 </div>
 
                 {/* Options List Dashboard Container */}
