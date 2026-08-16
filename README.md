@@ -38,6 +38,17 @@ inlined at **build** time, so changing it needs a redeploy, not a restart — an
 the backend's `APP_CONFIG__CORS__ORIGINS` has to name this app's domain back, or
 every request from the page fails while `curl` keeps working.
 
+### Node version
+
+Next 16 requires Node `>=20.9.0`. Nixpacks defaults to Node 18 and will fail the
+build with `"npm run build" did not complete successfully` unless it is told
+otherwise, so the version is pinned in two places it reads: `engines.node` in
+`package.json` and [`.nvmrc`](.nvmrc). Neither is decoration — remove them and
+the deploy breaks.
+
+If a Nixpacks change ever stops honouring both, `NIXPACKS_NODE_VERSION=22` as a
+service variable overrides everything.
+
 ## Talking to the API
 
 The browser calls the backend directly. There is no proxy and no rewrite, so two
