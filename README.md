@@ -31,7 +31,8 @@ The backend has to be running, or every screen falls back to its error state.
 
 ## Deploying to Railway
 
-Built by Nixpacks from [`railway.json`](railway.json); there is no Dockerfile.
+Built from the [`Dockerfile`](Dockerfile), which Railway uses in preference to
+its own builder.
 
 Set `NEXT_PUBLIC_API_URL` to the backend's public URL, ending in `/api`. It is
 inlined at **build** time, so changing it needs a redeploy, not a restart — and
@@ -40,14 +41,12 @@ every request from the page fails while `curl` keeps working.
 
 ### Node version
 
-Next 16 requires Node `>=20.9.0`. Nixpacks defaults to Node 18 and will fail the
-build with `"npm run build" did not complete successfully` unless it is told
-otherwise, so the version is pinned in two places it reads: `engines.node` in
-`package.json` and [`.nvmrc`](.nvmrc). Neither is decoration — remove them and
-the deploy breaks.
+Next 16 requires Node `>=20.9.0`, and a builder that guesses 18 fails
+`next build` with nothing wrong in the code — which is what happened before the
+Dockerfile existed. The image now states `node:22-alpine` outright.
 
-If a Nixpacks change ever stops honouring both, `NIXPACKS_NODE_VERSION=22` as a
-service variable overrides everything.
+`engines.node` in `package.json` and [`.nvmrc`](.nvmrc) stay anyway: they are
+what tells a contributor's local toolchain the same thing.
 
 ## Talking to the API
 
