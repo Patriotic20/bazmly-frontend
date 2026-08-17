@@ -6,7 +6,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { authKeys, getMe, telegramLogin } from "@/lib/api/endpoints/auth";
 import { hasSession } from "@/lib/api/auth-tokens";
 import { TelegramPhoneStep } from "@/components/telegram-phone-step";
-import { announceReady, getInitData, getWebApp, isInsideTelegram } from "@/lib/telegram/webapp";
+import {
+  announceReady,
+  bindViewportHeight,
+  getInitData,
+  getWebApp,
+  isInsideTelegram,
+} from "@/lib/telegram/webapp";
 import type { TelegramWebAppUser } from "@/lib/telegram/types";
 
 /**
@@ -98,6 +104,11 @@ export function TelegramProvider({ children }: { children: React.ReactNode }) {
         });
       });
   }, [inside, queryClient]);
+
+  // Not gated on `inside`: the height is a layout concern, not an identity one.
+  // A runtime that reports a viewport gets used even when it hands over no
+  // initData, and `bindViewportHeight` is a no-op when there is no runtime.
+  useEffect(() => bindViewportHeight(), []);
 
   const status: TelegramStatus = !inside
     ? "outside"

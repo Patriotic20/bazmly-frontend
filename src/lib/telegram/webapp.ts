@@ -97,3 +97,41 @@ export function requestContact(): Promise<{ contactData: string } | { refused: C
     });
   });
 }
+
+/** Marks the document so CSS can tell it is running inside Telegram. */
+const TELEGRAM_CLASS = "tg-app";
+const HEIGHT_VARIABLE = "--tg-app-height";
+
+/**
+ * Bind the layout's idea of "full height" to Telegram's.
+ *
+ * `100vh` is the visible window in a browser, but inside Telegram the app is a
+ * panel with a header above it — so `min-h-screen` makes every screen taller
+ * than the space it has, and the bottom of the content sits below the fold.
+ *
+ * Telegram reports the real figure and changes it when the sheet is expanded or
+ * the keyboard opens, hence the subscription. `viewportStableHeight` rather than
+ * `viewportHeight`: the stable one excludes the transient shrink while the
+ * keyboard animates, which otherwise makes the layout jump on every focus.
+ *
+ * Returns a cleanup that puts the document back as it was.
+ */
+export function bindViewportHeight(): () => void {
+  const webApp = getWebApp();
+  if (!webApp || typeof document === "undefined") return () => {};
+
+  const root = document.documentElement;
+  const apply = () => {
+    root.style.setProperty(HEIGHT_VARIABLE, `${webApp.viewportStableHeight}px`);
+  };
+
+  root.classList.add(TELEGRAM_CLASS);
+  apply();
+  webApp.onEvent("viewportChanged", apply);
+
+  return () => {
+    webApp.offEvent("viewportChanged", apply);
+    root.classList.remove(TELEGRAM_CLASS);
+    root.style.removeProperty(HEIGHT_VARIABLE);
+  };
+}

@@ -40,6 +40,19 @@
   --foreground: #F3F4F6;
 }
 
+/* Inside Telegram the app is a panel under a header, so `100vh` — what
+   `min-h-screen` and `h-screen` mean — is taller than the space it actually has,
+   and the foot of every screen falls below the fold. `--tg-app-height` is set
+   from Telegram's own figure and updated when it changes; outside Telegram the
+   class is absent and these rules never apply. */
+html.tg-app .min-h-screen {
+  min-height: var(--tg-app-height, 100vh);
+}
+
+html.tg-app .h-screen {
+  height: var(--tg-app-height, 100vh);
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
