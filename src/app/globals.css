@@ -1,5 +1,13 @@
 @import "tailwindcss";
 
+/* `ThemeProvider` puts `.dark` on <html>, but Tailwind v4's `dark:` variant
+   listens to the operating system's preference by default — so the 176 `dark:`
+   utilities in this app answered to the OS while everything else answered to the
+   class, and the two disagreed. Inside Telegram that showed as a white band on a
+   dark screen; on the web, where both happened to be light, it showed as nothing
+   at all. This points the variant at the class the app actually sets. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* Tailwind's `font-sans` and `font-mono` resolve to these. Without them the
      utilities fall back to Tailwind's generic stacks and *override* the family
