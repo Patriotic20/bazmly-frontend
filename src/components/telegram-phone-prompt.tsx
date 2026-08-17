@@ -1,13 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Phone, Check } from "lucide-react";
 
-import { authKeys, shareTelegramContact } from "@/lib/api/endpoints/auth";
-import { requestContact } from "@/lib/telegram/webapp";
+import { useSharePhone } from "@/lib/telegram/use-share-phone";
 import { useTelegram } from "@/components/telegram-provider";
-import { ApiError } from "@/lib/api/types";
 
 /**
  * One tap instead of six digits.
@@ -22,33 +18,9 @@ import { ApiError } from "@/lib/api/types";
  */
 export function TelegramPhonePrompt({ hasPhone }: { hasPhone: boolean }) {
   const { inside } = useTelegram();
-  const [refusal, setRefusal] = useState<string | null>(null);
-  const queryClient = useQueryClient();
-
-  const share = useMutation({
-    mutationFn: async () => {
-      const outcome = await requestContact();
-      if ("refused" in outcome) {
-        // Not an error: an old client or a person who said no. Both are answers.
-        setRefusal(
-          outcome.refused === "unsupported"
-            ? "Telegram ilovangizni yangilang"
-            : "Raqamni ulashmadingiz",
-        );
-        return null;
-      }
-      setRefusal(null);
-      return shareTelegramContact(outcome.contactData);
-    },
-    onSuccess: (user) => {
-      if (user) void queryClient.invalidateQueries({ queryKey: authKeys.me() });
-    },
-  });
+  const { share, isSharing, problem } = useSharePhone();
 
   if (!inside || hasPhone) return null;
-
-  const failure =
-    share.error instanceof ApiError ? share.error.message : share.error ? "Xatolik yuz berdi" : null;
 
   return (
     <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4 flex flex-col gap-3">
@@ -62,17 +34,15 @@ export function TelegramPhonePrompt({ hasPhone }: { hasPhone: boolean }) {
         </div>
       </div>
 
-      {(failure || refusal) && (
-        <p className="text-xs font-semibold text-red-500">{failure ?? refusal}</p>
-      )}
+      {problem && <p className="text-xs font-semibold text-red-500">{problem}</p>}
 
       <button
         type="button"
-        onClick={() => share.mutate()}
-        disabled={share.isPending}
+        onClick={share}
+        disabled={isSharing}
         className="w-full py-3 rounded-xl bg-[#FF6B00] hover:bg-[#E05000] disabled:opacity-50 text-white font-bold text-sm transition-all active:scale-98 flex items-center justify-center gap-2"
       >
-        {share.isPending ? (
+        {isSharing ? (
           "Kutilmoqda..."
         ) : (
           <>
