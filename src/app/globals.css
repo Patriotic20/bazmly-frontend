@@ -1,6 +1,14 @@
 @import "tailwindcss";
 
 @theme {
+  /* Tailwind's `font-sans` and `font-mono` resolve to these. Without them the
+     utilities fall back to Tailwind's generic stacks and *override* the family
+     set on `body` — which is why the vouchers screen rendered in a different
+     font from every other screen, and why the Geist Mono the layout loads was
+     never actually used by the `font-mono` class. */
+  --font-sans: var(--font-plus-jakarta-sans), system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
+
   --color-primary: #FF6B00;
   --color-primary-hover: #E05E00;
   --color-brand-dark: #333333;
