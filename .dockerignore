@@ -12,8 +12,8 @@ npm-debug.log*
 README.md
 AGENTS.md
 CLAUDE.md
-docs/
 .playwright-mcp/
+docs/
 Dockerfile
 .dockerignore
 railway.json

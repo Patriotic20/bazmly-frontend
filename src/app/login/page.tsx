@@ -2,19 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useQueryClient } from "@tanstack/react-query";
-import { TelegramPhonePrompt } from "@/components/telegram-phone-prompt";
 import { useTheme } from "@/components/theme-provider";
-import {
-  authKeys,
-  checkPhone,
-  getMyGroup,
-  login,
-  register,
-  staffLogin,
-} from "@/lib/api/endpoints/auth";
-import { ApiError, type TokenPair } from "@/lib/api/types";
-import { useSession } from "@/lib/hooks/use-session";
 import {
   Globe,
   Search,
@@ -42,15 +30,30 @@ import {
   Trash2,
   Sun,
   Moon,
+  Loader2,
+  Store,
 } from "lucide-react";
 import Navbar from "@/components/navbar";
+import { TelegramPhonePrompt } from "@/components/telegram-phone-prompt";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  authService,
+  userService,
+  geoService,
+  partnerService,
+  engagementService,
+  RegionRead,
+  DistrictRead,
+  NotificationRead,
+} from "@/lib/api";
 
 type Step =
   | 1
   | 2
   | "login"
   | "register_customer"
-  | "register_customer_password"
+  | "register_customer_phone_otp"
+  | "register_customer_email_otp"
   | "register_customer_name"
   | 3
   | "partner_address"
@@ -64,19 +67,6 @@ type Step =
   | "partner_password"
   | 7
   | 8;
-
-/**
- * Does this look like a phone number rather than an issued login?
- *
- * Deliberately loose. The server does the real normalising — `901234567`,
- * `998901234567` and `+998 90 123-45-67` all reduce to one number there — so all
- * this has to decide is which endpoint to try. Anything with a letter in it is a
- * login; a bare run of digits is a number.
- */
-function looksLikePhone(value: string): boolean {
-  const digits = value.replace(/[\s()+-]/g, "");
-  return /^\d{7,15}$/.test(digits);
-}
 
 interface Language {
   code: string;
@@ -94,25 +84,34 @@ const LANGUAGES: Language[] = [
 const FAQS = [
   {
     q: "Qanday qilib restoran yoki marosim zalini bron qilish mumkin?",
-    a: "Loyiha bosh sahifasidagi 'Joylar' bo'limiga o'ting, o'zingizga yoqqan restoran yoki zalni tanlang. Sana, vaqt va stol raqamini belgilab, to'lovni tasdiqlang. Broningiz muvaffaqiyatli amalga oshgach, u 'Tarix' bo'limida faol holatda ko'rinadi."
+    a: "Bosh sahifadan restoran yoki to'yxonani tanlang, sana, vaqt va mehmonlar sonini belgilang. Bron muassasaga so'rov sifatida boradi; muassasa tasdiqlagach, chiptangiz 'Mening bronlarim' bo'limida faollashadi."
   },
   {
-    q: "To'lovlar xavfsizmi va qanday amalga oshiriladi?",
-    a: "Barcha to'lovlar hamkor rasmiy to'lov tizimlari orqali 3D-Secure himoyasi bilan amalga oshiriladi. Humo yoki Uzcard bank kartangizni kiritib, SMS-kod orqali tasdiqlash yo'li bilan mutlaqo xavfsiz to'lov qilishingiz mumkin."
+    q: "To'lov qanday amalga oshiriladi?",
+    a: "Ilova orqali onlayn to'lov hozircha yo'q — to'lov muassasaning o'zida amalga oshiriladi. Ba'zi to'yxonalar depozit talab qiladi; uning miqdori bron oynasida ko'rsatiladi."
   },
   {
     q: "Buyurtmani bekor qilsam, pulim qaytariladimi?",
-    a: "Ha, albatta. Agar tadbiringiz boshlanishiga 48 soatdan ko'proq vaqt qolgan bo'lsa, buyurtmani bekor qilishingiz mumkin va mablag'ingiz kartangizga 100% qaytarib beriladi. 48 soatdan kam vaqt qolganda esa bekor qilish imkoniyati mavjud emas."
+    a: "Bronni 'Mening bronlarim' bo'limidan bekor qilishingiz mumkin. Depozit to'langan bo'lsa va tadbirga 24 soatdan kam qolgan bo'lsa, depozit qaytarilmaydi."
   },
   {
     q: "Promo-kodlar va kuponlardan qanday foydalanaman?",
-    a: "Mavjud kuponlarni 'Voucher' bo'limida ko'rishingiz mumkin. Buyurtmani rasmiylashtirish va to'lov sahifasida promo-kod kiritish oynasiga kupon kodini kiritsangiz, chegirma avtomatik ravishda buyurtma summasiga qo'llaniladi."
+    a: "Promokodlar hozircha mavjud emas. Muassasalarning o'z chegirmalari esa ularning sahifasida ko'rsatiladi."
   }
 ];
+
+/** `"09:00 - 23:00"` as two `HH:MM` strings; null when it is not that shape. */
+function parseHours(value: string): { opens: string; closes: string } | null {
+  const match = value.match(/^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/);
+  if (!match) return null;
+  const pad = (h: string) => h.padStart(2, "0");
+  return { opens: `${pad(match[1])}:${match[2]}`, closes: `${pad(match[3])}:${match[4]}` };
+}
 
 export default function LoginPage() {
   const router = useRouter();
   const { theme, toggleTheme } = useTheme();
+  const { user, login, register, loginStaff, logout, updateProfile, deleteAccount, checkPhone } = useAuth();
   const isDark = theme === "dark";
   const formatPhone = (val: string) => {
     if (!val) return "";
@@ -130,7 +129,9 @@ export default function LoginPage() {
   };
   const [mounted, setMounted] = useState(false);
   const [isRegistered, setIsRegistered] = useState(false);
-  const [step, setStep] = useState<Step>(1);
+  // Step 1 was an interface-language picker; the interface has one language
+  // and the server no longer stores a choice, so the wizard starts at 2.
+  const [step, setStep] = useState<Step>(2);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   
@@ -140,10 +141,6 @@ export default function LoginPage() {
   const [phone, setPhone] = useState("");
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);
   const [fullName, setFullName] = useState("");
-  // Two fields, because the API requires both and a space is not a reliable
-  // divider between a given name and a family name.
-  const [firstName, setFirstName] = useState("");
-  const [lastName, setLastName] = useState("");
   const [location, setLocation] = useState("Tashkent, Tashkent city");
   const [role, setRole] = useState<"customer" | "partner">("customer");
   
@@ -154,6 +151,8 @@ export default function LoginPage() {
   const [venueName, setVenueName] = useState("");
   const [venueType, setVenueType] = useState<"restaurant" | "toyxona">("restaurant");
   const [venueHours, setVenueHours] = useState("09:00 - 23:00");
+  const [partnerStreet, setPartnerStreet] = useState("");
+  const [partnerHouse, setPartnerHouse] = useState("");
   const [venueCapacity, setVenueCapacity] = useState("");
   const [venuePrice, setVenuePrice] = useState("");
   const [venueImages, setVenueImages] = useState<string[]>([]);
@@ -161,6 +160,11 @@ export default function LoginPage() {
   const [isNumLayout, setIsNumLayout] = useState(false);
   const [reg, setReg] = useState("");
   const [dist, setDist] = useState("");
+  const [partnerRegions, setPartnerRegions] = useState<RegionRead[]>([]);
+  const [partnerDistricts, setPartnerDistricts] = useState<DistrictRead[]>([]);
+  const [selectedPartnerRegionId, setSelectedPartnerRegionId] = useState<number | null>(null);
+  const [selectedPartnerDistrictId, setSelectedPartnerDistrictId] = useState<number | null>(null);
+  const [loadingPartnerDistricts, setLoadingPartnerDistricts] = useState(false);
 
   // Profile Edit Mode States
   const [isEditing, setIsEditing] = useState(false);
@@ -230,114 +234,74 @@ export default function LoginPage() {
   };
 
   const [isCaps, setIsCaps] = useState(false);
-  const queryClient = useQueryClient();
-  const session = useSession();
   
-  /** The one place a successful sign-in lands, whichever screen produced it. */
-  const afterAuth = async (pair: TokenPair) => {
-    await queryClient.invalidateQueries({ queryKey: authKeys.me() });
-    await queryClient.invalidateQueries({ queryKey: authKeys.myGroup() });
-
-    // Both of these are refusals to continue, not preferences.
-    if (pair.must_change_password) {
-      setStep("register_customer_password");
-      showToast("Parolingizni yangilang");
-      return;
-    }
-    if (!pair.profile_completed) {
-      setStep("register_customer_name");
-      return;
-    }
-
-    setIsRegistered(true);
-    showToast("Tizimga muvaffaqiyatli kirdingiz!");
-
-    // A partner is someone who owns a chain — ask, rather than trust a flag.
-    // Routed through the query client so `useSession` reuses the same answer
-    // instead of asking again a moment later.
-    try {
-      await queryClient.fetchQuery({ queryKey: authKeys.myGroup(), queryFn: () => getMyGroup() });
-      router.push("/admin");
-    } catch {
-      router.push("/feed");
-    }
-  };
-
-  const describe = (err: unknown) =>
-    err instanceof ApiError ? err.message : "Xatolik yuz berdi. Qaytadan urinib ko'ring.";
-
-  /**
-   * The phone number decides the next screen.
-   *
-   * There is no "do you already have an account?" question, because the server
-   * knows. `password_required` distinguishes an account with a password from one
-   * that signs in on the number alone.
-   */
-  const handlePhoneContinue = async () => {
-    setError("");
-    setLoading(true);
-    try {
-      const result = await checkPhone("+998" + phone.trim());
-      if (result.registered) {
-        setStep(result.password_required ? "register_customer_password" : "login");
-        if (!result.password_required) {
-          await afterAuth(await login("+998" + phone.trim()));
-        }
-      } else {
-        setStep("register_customer_name");
-      }
-    } catch (err) {
-      setError(describe(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  /** A returning customer typing their password. */
-  const handlePasswordSubmit = async () => {
-    setError("");
-    if (!password.trim()) {
-      setError("Parolni kiriting!");
-      return;
-    }
-    setLoading(true);
-    try {
-      await afterAuth(await login("+998" + phone.trim(), password.trim()));
-    } catch (err) {
-      setError(describe(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  /**
-   * Registration: name, surname and password, in one screen.
-   *
-   * First and last name are separate fields because the API requires both and
-   * splitting one string on a space is guessing at where a name divides.
-   */
   const handleCustomerFinalRegister = async () => {
     setError("");
-    if (!firstName.trim() || !lastName.trim()) {
+    const nameParts = fullName.trim().split(/\s+/);
+    if (nameParts.length < 2) {
       setError("Ism va familiyangizni kiriting!");
       return;
     }
-    if (password.trim().length < 6) {
-      setError("Parol kamida 6 ta belgidan iborat bo'lsin!");
+    if (password.trim().length < 8) {
+      setError("Parol kamida 8 belgidan iborat bo'lsin!");
       return;
     }
 
     setLoading(true);
     try {
-      const pair = await register({
-        phone: "+998" + phone.trim(),
-        first_name: firstName.trim(),
-        last_name: lastName.trim(),
+      const firstName = nameParts[0];
+      const lastName = nameParts.slice(1).join(" ");
+      let formattedPhone = phone.trim().replace(/\D/g, "");
+      if (!formattedPhone.startsWith("998")) {
+        formattedPhone = "998" + formattedPhone;
+      }
+      formattedPhone = "+" + formattedPhone;
+
+      await register({
+        phone: formattedPhone,
+        first_name: firstName,
+        last_name: lastName,
         password: password.trim(),
       });
-      await afterAuth(pair);
+
+      setIsRegistered(true);
+      setRole("customer");
+      setFullName(fullName.trim());
+      setPhone(formattedPhone);
+      showToast("Ro'yxatdan muvaffaqiyatli o'tdingiz!");
+      router.push("/feed");
+    } catch (err: any) {
+      setError(err?.message || "Ro'yxatdan o'tishda xatolik yuz berdi");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePhoneCheckAndContinue = async () => {
+    if (phone.length < 9) {
+      setError("Telefon raqamingizni to'liq kiriting!");
+      return;
+    }
+    setError("");
+    let formattedPhone = phone.trim().replace(/\D/g, "");
+    if (!formattedPhone.startsWith("998")) {
+      formattedPhone = "998" + formattedPhone;
+    }
+    formattedPhone = "+" + formattedPhone;
+
+    setLoading(true);
+    try {
+      const result = await checkPhone(formattedPhone);
+      if (result.registered) {
+        showToast("Bu raqam ro'yxatdan o'tgan — parolingiz bilan kiring.");
+        setUsername(phone);
+        setStep("login");
+      } else {
+        // There is no SMS step behind the API, so none is pretended here.
+        setStep("register_customer_name");
+      }
     } catch (err) {
-      setError(describe(err));
+      setError(err instanceof Error ? err.message : "Raqamni tekshirib bo'lmadi");
     } finally {
       setLoading(false);
     }
@@ -354,7 +318,7 @@ export default function LoginPage() {
           setPhone(prev => prev + key);
         }
       }
-    } else if (step === "register_customer_password") {
+    } else if (step === "register_customer_phone_otp" || step === "register_customer_email_otp") {
       if (key === "⌫") {
         const newOtp = [...otp];
         for (let i = 5; i >= 0; i--) {
@@ -614,21 +578,59 @@ export default function LoginPage() {
   };
 
   const [activeModal, setActiveModal] = useState<string | null>(null);
+  const [notifications, setNotifications] = useState<NotificationRead[] | null>(null);
+  // Owning a chain does not change users.role on the server, so the panel link
+  // follows the chain itself rather than the role.
+  const [ownsChain, setOwnsChain] = useState(false);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState("");
 
+  // Mount effect to check registration state
   useEffect(() => {
     setMounted(true);
+    if (user) {
+      setIsRegistered(true);
+      const name = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Foydalanuvchi";
+      setFullName(name);
+      if (user.phone) setPhone(user.phone);
+      const isPrivileged =
+        user.role === "partner" ||
+        user.role === "venue_owner" ||
+        user.role === "venue_staff" ||
+        user.role === "admin" ||
+        user.role === "staff";
+      setRole(isPrivileged ? "partner" : "customer");
+    } else {
+      // Only a signed-in account has a profile to show.
+      setIsRegistered(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    partnerService
+      .getMyGroup()
+      .then(() => setOwnsChain(true))
+      .catch(() => setOwnsChain(false));
+  }, [user]);
+
+  useEffect(() => {
+    geoService.getRegions()
+      .then((res) => setPartnerRegions(res || []))
+      .catch(() => {});
   }, []);
 
-  // The profile screen shows whoever the server says is signed in. The five
-  // localStorage keys this used to read are gone, along with the plain-text
-  // password list that sat beside them.
   useEffect(() => {
-    if (!session.user) return;
-    setIsRegistered(true);
-    setFullName(`${session.user.first_name} ${session.user.last_name}`);
-    setPhone(session.user.phone ?? "");
-  }, [session.user]);
+    if (selectedPartnerRegionId) {
+      setLoadingPartnerDistricts(true);
+      geoService.getDistricts(selectedPartnerRegionId)
+        .then((d) => setPartnerDistricts(d || []))
+        .catch(() => setPartnerDistricts([]))
+        .finally(() => setLoadingPartnerDistricts(false));
+    } else {
+      setPartnerDistricts([]);
+    }
+  }, [selectedPartnerRegionId]);
 
   // Dynamic bottom navigation bar visibility controller for cards sub-flows & logout drawers
   useEffect(() => {
@@ -676,31 +678,60 @@ export default function LoginPage() {
     setToastMessage(msg);
   };
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     if (!editName.trim()) {
       showToast("Ism va familiyangiz bo'sh bo'lishi mumkin emas!");
       return;
     }
-    const cleanLocation = editLocation.trim() || "Tashkent, Tashkent city";
-    setFullName(editName);
-    setLocation(cleanLocation);
-    setPhone(editPhone);
-    localStorage.setItem("fullName", editName);
-    localStorage.setItem("location", cleanLocation);
-    localStorage.setItem("phone", editPhone);
-    setIsEditing(false);
-    showToast("Profil muvaffaqiyatli saqlandi!");
+    const nameParts = editName.trim().split(/\s+/);
+    if (nameParts.length < 2) {
+      showToast("Ism va familiyangizni kiriting!");
+      return;
+    }
+    const firstName = nameParts[0];
+    const lastName = nameParts.slice(1).join(" ");
+    setLoading(true);
+    try {
+      await updateProfile({
+        first_name: firstName,
+        last_name: lastName,
+      });
+      showToast("Profil muvaffaqiyatli saqlandi!");
+      setFullName(editName);
+      setPhone(editPhone);
+      setIsEditing(false);
+    } catch (err: any) {
+      showToast(err?.message || "Profilni saqlashda xatolik!");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    setLoading(true);
+    try {
+      await deleteAccount();
+      setIsRegistered(false);
+      setFullName("");
+      setPhone("");
+      setStep(2);
+      setActiveModal(null);
+      showToast("Akkaunt muvaffaqiyatli o'chirildi.");
+    } catch (err: any) {
+      showToast(err?.message || "Akkauntni o'chirishda xatolik yuz berdi.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleLogout = async () => {
-    // Ends the session on the server too: dropping the refresh token here alone
-    // would leave a working credential in the database for thirty days.
-    await session.signOut();
+    try {
+      await logout();
+    } catch {}
     setIsRegistered(false);
     setFullName("");
     setPhone("");
-    setPassword("");
-    setStep(1);
+    setStep(2);
     setActiveModal(null);
     showToast("Akkauntdan chiqildi.");
   };
@@ -721,14 +752,18 @@ export default function LoginPage() {
         setError("Joyingiz nomini kiriting!");
         return;
       }
-      if (!reg || !dist) {
+      if (!reg || !dist || !selectedPartnerDistrictId) {
         setError("Viloyat va tumanni belgilang!");
+        return;
+      }
+      if (!partnerStreet.trim() || !partnerHouse.trim()) {
+        setError("Ko'cha va uy raqamini kiriting!");
         return;
       }
       setStep("partner_hours");
     } else if (step === "partner_hours") {
-      if (!venueHours.trim()) {
-        setError("Ish tartibini kiriting!");
+      if (!parseHours(venueHours)) {
+        setError("Ish vaqtini \"09:00 - 23:00\" ko'rinishida kiriting!");
         return;
       }
       setStep(4);
@@ -743,40 +778,38 @@ export default function LoginPage() {
         setError("Narxni kiriting!");
         return;
       }
-      setStep(5);
-    } else if (step === 5) {
-      if (venueImages.length === 0) {
-        setError("Kamida bitta rasm tanlang!");
-        return;
-      }
+      // Photos have no upload endpoint yet, so the gallery step is skipped
+      // rather than collecting pictures that would never be saved.
       setStep(6);
     } else if (step === 6) {
+      if (fullName.trim().split(/\s+/).length < 2) {
+        setError("Ism va familiyangizni kiriting!");
+        return;
+      }
       if (phone.length < 9) {
         setError("Telefon raqamini to'liq kiriting!");
         return;
       }
       setStep("partner_password");
     } else if (step === "partner_password") {
-      if (!password.trim()) {
-        setError("Parol kiriting!");
+      if (password.trim().length < 8) {
+        setError("Parol kamida 8 belgidan iborat bo'lsin!");
         return;
       }
-      setLoading(true);
-      setTimeout(() => {
-        setLoading(false);
-        setStep(7);
-      }, 1000);
+      handleCompletePartnerRegistration();
     }
   };
 
   const handleBackStep = () => {
     setError("");
     if (step === 2) {
-      setStep(1);
+      setStep(2);
     } else if (step === "login" || step === "register_customer") {
       setStep(2);
-    } else if (step === "register_customer_password") {
+    } else if (step === "register_customer_phone_otp") {
       setStep("register_customer");
+    } else if (step === "register_customer_email_otp") {
+      setStep("register_customer_phone_otp");
     } else if (step === "register_customer_name") {
       setStep("register_customer");
     } else if (step === 3) {
@@ -796,7 +829,7 @@ export default function LoginPage() {
     } else if (step === 5) {
       setStep("partner_price");
     } else if (step === 6) {
-      setStep(5);
+      setStep("partner_price");
     } else if (step === "partner_password") {
       setStep(6);
     } else if (step === 7) {
@@ -806,20 +839,25 @@ export default function LoginPage() {
     }
   };
 
-  /**
-   * The field accepts a phone number or an issued login, and they sign in
-   * through different endpoints.
-   *
-   * `/auth/staff-login` looks the value up in `users.login`, which is null for
-   * every customer and every venue owner — so sending everyone there refused
-   * everyone but staff, with the right password, and said only "login yoki parol
-   * noto'g'ri". The screen already promises "admin yoki telefon"; this makes it
-   * true.
-   *
-   * A number goes to the customer endpoint, anything else to staff. The one
-   * ambiguous case is a staff login made only of digits — nothing forbids it —
-   * so a refused phone attempt falls through to staff rather than stopping.
-   */
+  const handleOtpChange = (value: string, index: number) => {
+    if (isNaN(Number(value))) return;
+    const newOtp = [...otp];
+    newOtp[index] = value.substring(value.length - 1);
+    setOtp(newOtp);
+
+    if (value && index < 5) {
+      const nextInput = document.getElementById(`otp-${index + 1}`);
+      nextInput?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, index: number) => {
+    if (e.key === "Backspace" && !otp[index] && index > 0) {
+      const prevInput = document.getElementById(`otp-${index - 1}`);
+      prevInput?.focus();
+    }
+  };
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -829,168 +867,149 @@ export default function LoginPage() {
       return;
     }
 
-    const entered = username.trim();
-    const secret = password.trim();
-
     setLoading(true);
     try {
-      if (looksLikePhone(entered)) {
-        try {
-          await afterAuth(await login(entered, secret));
-          return;
-        } catch (phoneError) {
-          if (!(phoneError instanceof ApiError)) throw phoneError;
-          // Fall through: an all-digit staff login reads as a phone number.
+      const digitsOnly = username.trim().replace(/\D/g, "");
+      const isPhoneNumber = digitsOnly.length >= 7;
+
+      if (isPhoneNumber) {
+        let phoneToLogin = digitsOnly;
+        if (!phoneToLogin.startsWith("998") && phoneToLogin.length === 9) {
+          phoneToLogin = "998" + phoneToLogin;
         }
+        if (!phoneToLogin.startsWith("+")) {
+          phoneToLogin = "+" + phoneToLogin;
+        }
+
+        await login({ phone: phoneToLogin, password: password.trim() });
+        showToast("Tizimga muvaffaqiyatli kirdingiz!");
+        setIsRegistered(true);
+        const me = await userService.getMe().catch(() => null);
+        const ownsGroup = await partnerService.getMyGroup().then(() => true, () => false);
+        if (ownsGroup || (me && (me.role === "venue_owner" || me.role === "venue_staff"))) {
+          router.push("/admin");
+        } else {
+          router.push("/feed");
+        }
+        return;
+      } else {
+        // Staff username login
+        await loginStaff({ login: username.trim(), password: password.trim() });
+        showToast("Xodim sifatida tizimga kirdingiz!");
+        setIsRegistered(true);
+        router.push("/admin");
+        return;
       }
-      await afterAuth(await staffLogin(entered, secret));
-    } catch (err) {
-      // The server refuses an unknown login and a wrong password identically,
-      // on purpose — this message must not distinguish them either.
-      setError(describe(err));
+    } catch (err: any) {
+      setError(err?.message || "Login yoki parol noto'g'ri!");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleOtpConfirm = () => {
+  const handleCustomerRegisterSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
     setError("");
-    if (otp.some((v) => !v)) {
-      setError("6 xonali kodni to'liq kiriting!");
+
+    if (!fullName.trim() || !phone.trim() || !password.trim()) {
+      setError("Iltimos, barcha maydonlarni to'ldiring!");
       return;
     }
 
+    setStep(6);
+  };
+
+  /**
+   * The account, the chain and its first branch, in that order — each step
+   * stops on the server's refusal instead of carrying on as if it worked.
+   */
+  const handleCompletePartnerRegistration = async () => {
+    setError("");
+    const district = partnerDistricts.find((d) => d.id === selectedPartnerDistrictId);
+    const hours = parseHours(venueHours);
+    if (!district || !hours) {
+      setError("Manzil yoki ish vaqti to'liq emas — orqaga qaytib tekshiring.");
+      return;
+    }
+    let formattedPhone = phone.trim().replace(/\D/g, "");
+    if (!formattedPhone.startsWith("998")) formattedPhone = "998" + formattedPhone;
+    formattedPhone = "+" + formattedPhone;
+    const [firstName, ...rest] = fullName.trim().split(/\s+/);
+    const venueKind = accountType === "toyxona" ? "toyxona" : "restoran";
+    const size = Number(venueCapacity) || null;
+    const price = Number(venuePrice.replace(/\D/g, "")) || null;
+
     setLoading(true);
-    setTimeout(() => {
+    try {
+      await register({ phone: formattedPhone, password: password.trim(), first_name: firstName, last_name: rest.join(" ") });
+      const created = await partnerService.createGroupWithBranch({
+        group: { name: venueName.trim(), primary_venue_type: venueKind },
+        branch: {
+          name: venueName.trim(),
+          venue_type: venueKind,
+          district_id: district.id,
+          street: partnerStreet.trim(),
+          house_number: partnerHouse.trim(),
+          // The district's own point until there is a map picker.
+          latitude: Number(district.latitude),
+          longitude: Number(district.longitude),
+          phone: formattedPhone,
+          base_price: price,
+          ...(venueKind === "toyxona" ? { capacity_max: size } : { total_seats: size }),
+        },
+      });
+      const venueId = created.branches[0].id;
+      await partnerService.updateWorkingHours(venueId, {
+        days: Array.from({ length: 7 }, (_, weekday) => ({
+          weekday,
+          opens_at: `${hours.opens}:00`,
+          closes_at: `${hours.closes}:00`,
+          is_closed: false,
+        })),
+      });
+      await partnerService.updateVenue(venueId, { status: "active" });
+      setIsRegistered(true);
+      setRole("partner");
+      setStep(8);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ro'yxatdan o'tishda xatolik yuz berdi");
+    } finally {
       setLoading(false);
-      if (accountType === "customer") {
-        // Complete customer registration
-        const newAccount = {
-          username: phone.trim(),
-          password: password.trim(),
-          role: "customer" as const,
-          name: fullName.trim(),
-          phone: "+998" + phone.trim(),
-          location: "Tashkent, Tashkent city"
-        };
-        const accountsRaw = localStorage.getItem("registeredAccounts");
-        let accountsList = [];
-        if (accountsRaw) {
-          try {
-            accountsList = JSON.parse(accountsRaw);
-          } catch (err) {}
-        }
-        accountsList.push(newAccount);
-        localStorage.setItem("registeredAccounts", JSON.stringify(accountsList));
-
-        // Save active session
-        localStorage.setItem("fullName", fullName);
-        localStorage.setItem("phone", "+998" + phone);
-        localStorage.setItem("location", "Tashkent, Tashkent city");
-        localStorage.setItem("userRole", "customer");
-        localStorage.setItem("isRegistered", "true");
-
-        setIsRegistered(true);
-        setRole("customer");
-        showToast("Muvaffaqiyatli ro'yxatdan o'tdingiz!");
-        router.push("/feed");
-      } else {
-        // Partner goes to live status page
-        setStep(8);
-      }
-    }, 1000);
+    }
   };
 
-  const handleCompletePartnerRegistration = () => {
-    // Generate new account credentials
-    const newAccount = {
-      username: phone.trim(),
-      password: password.trim(),
-      role: "partner" as const,
-      name: venueName.trim(),
-      phone: "+998" + phone.trim(),
-      location: `${reg}, ${dist}`
-    };
-
-    // Save to accounts list
-    const accountsRaw = localStorage.getItem("registeredAccounts");
-    let accountsList = [];
-    if (accountsRaw) {
-      try {
-        accountsList = JSON.parse(accountsRaw);
-      } catch (err) {}
-    }
-    accountsList.push(newAccount);
-    localStorage.setItem("registeredAccounts", JSON.stringify(accountsList));
-
-    // Save to partner venues list
-    const priceNumVal = Number(venuePrice.replace(/\D/g, "")) || 4000000;
-    const capacityNumVal = Number(venueCapacity.replace(/\D/g, "")) || 150;
-    const formattedPriceText = priceNumVal.toLocaleString("uz-UZ") + " UZS dan";
-
-    const newVenue = {
-      id: "partner-user-" + Date.now(),
-      name: venueName.trim(),
-      location: `${reg}, ${dist}`,
-      capacity: `${capacityNumVal} kishi`,
-      capacityNum: capacityNumVal,
-      priceText: formattedPriceText,
-      priceNum: priceNumVal,
-      rating: 5.0,
-      category: accountType === "restaurant" ? "restoran" as const : "toyxona" as const,
-      emoji: accountType === "restaurant" ? "🍽️" : "🏰",
-      tags: ["Yangi", "Premium"],
-    };
-
-    const storedVenuesRaw = localStorage.getItem("partnerVenues");
-    let partnerVenuesList = [];
-    if (storedVenuesRaw) {
-      try {
-        partnerVenuesList = JSON.parse(storedVenuesRaw);
-      } catch (err) {}
-    }
-    partnerVenuesList.push(newVenue);
-    localStorage.setItem("partnerVenues", JSON.stringify(partnerVenuesList));
-
-    // Save session
-    localStorage.setItem("fullName", venueName.trim());
-    localStorage.setItem("phone", "+998" + phone);
-    localStorage.setItem("location", `${reg}, ${dist}`);
-    localStorage.setItem("userRole", "partner");
-    localStorage.setItem("isRegistered", "true");
-
-    setIsRegistered(true);
-    setRole("partner");
-    setFullName(venueName.trim());
-    setPhone("+998" + phone);
-
-    showToast("Ro'yxatdan muvaffaqiyatli o'tdingiz!");
-    router.push("/admin");
+  const openNotifications = () => {
+    setShowMessages(true);
+    setNotifications(null);
+    setNotificationsError(null);
+    engagementService
+      .getNotifications(50, 0)
+      .then((page) => setNotifications(page.items))
+      .catch((err) => setNotificationsError(err instanceof Error ? err.message : "Xabarlarni yuklab bo'lmadi"));
   };
 
+  // Cards, interface languages and a booking "history" had no data behind
+  // them; history is the tickets page, the other two are gone.
+  const isPartnerAccount = ownsChain || user?.role === "venue_owner" || user?.role === "venue_staff";
   const menuItems = [
+    ...(isPartnerAccount
+      ? [
+          {
+            label: "Hamkor paneli",
+            icon: Store,
+            action: () => router.push("/admin"),
+          },
+        ]
+      : []),
     {
       label: "Xabarlar",
       icon: Bell,
-      action: () => setShowMessages(true),
+      action: openNotifications,
     },
     {
-      label: "Mening kartalarim",
-      icon: Wallet,
-      action: () => setShowCards(true),
-    },
-    {
-      label: "Tarix",
+      label: "Mening bronlarim",
       icon: Clock,
-      action: () => setShowHistory(true),
-    },
-    {
-      label: "Tillar",
-      icon: Languages,
-      action: () => {
-        setTempLanguage(selectedLang || "uz");
-        setShowLanguages(true);
-      },
+      action: () => router.push("/tickets"),
     },
     {
       label: "Yordam",
@@ -1027,460 +1046,7 @@ export default function LoginPage() {
       {isRegistered ? (
         /* ==================== REGISTERED PROFILE VIEW ==================== */
         <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"} transition-all duration-300 ${isBottomNavHidden ? "-mb-16" : ""}`}>
-          {showCards ? (
-            /* ==================== HIGH-FIDELITY REGISTERED MY CARDS VIEW ==================== */
-            <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"}`}>
-              <style>{`
-                @keyframes slideUp {
-                  from { transform: translateY(100%); }
-                  to { transform: translateY(0); }
-                }
-                .animate-slide-up {
-                  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-                }
-              `}</style>
-
-              {showCardOtp ? (
-                /* ==================== SCREEN 4: OTP VERIFICATION VIEW ==================== */
-                <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"}`}>
-                  {/* Close Top Bar */}
-                  <div className="relative flex items-center justify-between px-6 py-5">
-                    <button
-                      onClick={() => setShowCardOtp(false)}
-                      className={`p-2 rounded-xl transition-all active:scale-95 ${
-                        isDark 
-                          ? "bg-white/5 text-white/80 hover:bg-white/10 hover:text-white" 
-                          : "bg-transparent text-zinc-950 hover:text-zinc-700"
-                      }`}
-                    >
-                      <X className="h-6 w-6" />
-                    </button>
-                    <div className="w-9 h-9" />
-                  </div>
-
-                  {/* Verification Form Content */}
-                  <main className="flex-1 px-6 py-4 flex flex-col justify-between max-w-md mx-auto w-full">
-                    <div className="space-y-4">
-                      <h1 className={`text-3xl font-bold tracking-tight ${isDark ? "text-white" : "text-black"}`}>Send verification code</h1>
-                      <p className={`text-base leading-relaxed ${isDark ? "text-white/60" : "text-zinc-800"}`}>
-                        We'll send a code to your phone number to verify your card
-                      </p>
-
-                      {/* 6 OTP Code Slots */}
-                      <div className="flex gap-2 justify-center py-4">
-                        {[0, 1, 2, 3, 4, 5].map((idx) => (
-                          <div
-                            key={idx}
-                            className={`w-11 h-14 rounded-xl border flex items-center justify-center text-lg font-bold transition-all duration-200 ${
-                              isDark 
-                                ? "bg-[#393939] border-white/10" 
-                                : "bg-white border-zinc-200 text-black"
-                            } ${
-                              cardOtp[idx] 
-                                ? "border-[#FF5A00] text-[#FF5A00]" 
-                                : ""
-                            }`}
-                          >
-                            {cardOtp[idx] || ""}
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Resend Code Link */}
-                      <div className="text-center">
-                        <button
-                          type="button"
-                          onClick={() => showToast("Kod qayta yuborildi!")}
-                          className="text-xs font-bold text-[#FF5A00] hover:text-primary-hover transition-colors"
-                        >
-                          Resent code
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Bottom Next Button & Keypad */}
-                    <div className="space-y-6 pb-2">
-                      <button
-                        type="button"
-                        disabled={cardOtp.some(digit => digit === "")}
-                        onClick={() => {
-                          const firstDigit = newCardNumber.charAt(0);
-                          const cardType = firstDigit === "8" ? "uzcard" : "humo";
-                          const masked = `**** **** **** ${newCardNumber.replace(/\s/g, "").slice(-4)}`;
-                          
-                          setUserCards((prev) => [
-                            ...prev,
-                            {
-                              id: Date.now().toString(),
-                              type: cardType,
-                              number: masked,
-                              name: fullName || "Alisher Raimov"
-                            }
-                          ]);
-                          
-                          // Reset & Success
-                          showToast("Karta muvaffaqiyatli qo'shildi!");
-                          setShowCardOtp(false);
-                          setShowAddCard(false);
-                          setNewCardNumber("");
-                          setNewCardExpiry("");
-                          setCardOtp(["", "", "", "", "", ""]);
-                        }}
-                        className={`w-full py-4 rounded-3xl font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                          cardOtp.some(digit => digit !== "")
-                            ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer"
-                            : isDark
-                              ? "bg-primary/20 text-white/30 cursor-not-allowed"
-                              : "bg-[#FF5A00]/20 text-white cursor-not-allowed"
-                        }`}
-                      >
-                        Next
-                      </button>
-
-                      {/* Custom Simulated Numeric Keypad matching screenshot 4 */}
-                      <div className={`grid grid-cols-3 gap-y-3 gap-x-4 px-4 py-4 rounded-t-3xl ${
-                        isDark ? "bg-[#2C2C2E]/50" : "bg-[#D1D3D9]/60 backdrop-blur-md"
-                      }`}>
-                        {[
-                          { val: "1", sub: "" },
-                          { val: "2", sub: "abc" },
-                          { val: "3", sub: "def" },
-                          { val: "4", sub: "ghi" },
-                          { val: "5", sub: "jkl" },
-                          { val: "6", sub: "mno" },
-                          { val: "7", sub: "pqrs" },
-                          { val: "8", sub: "tuv" },
-                          { val: "9", sub: "wxyz" },
-                          { val: "+*#", sub: "" },
-                          { val: "0", sub: "" },
-                          { val: "⌫", sub: "" }
-                        ].map((btn, index) => {
-                          const isSpecial = btn.val === "+*#" || btn.val === "⌫";
-                          return (
-                            <button
-                              key={index}
-                              type="button"
-                              onClick={() => handleKeypadPress(btn.val)}
-                              className={`rounded-lg py-2.5 flex flex-col items-center justify-center transition-all duration-100 ${
-                                isDark
-                                  ? "bg-[#2C2C2E] hover:bg-[#3A3A3C] active:bg-[#48484A]"
-                                  : isSpecial
-                                    ? "bg-transparent text-black hover:bg-zinc-200 active:bg-zinc-300"
-                                    : "bg-white text-black shadow-[0_1px_1px_rgba(0,0,0,0.18)] hover:bg-zinc-50 active:bg-zinc-150"
-                              }`}
-                            >
-                              <span className={`text-xl font-bold leading-tight ${isDark ? "text-white" : "text-black"}`}>{btn.val}</span>
-                              {btn.sub && <span className={`text-[9px] font-medium uppercase tracking-widest leading-none ${
-                                isDark ? "text-white/40" : "text-zinc-500"
-                              }`}>{btn.sub}</span>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </main>
-                </div>
-              ) : showAddCard ? (
-                /* ==================== SCREEN 2 & 3: ADD CARD DETAILS VIEW ==================== */
-                <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"}`}>
-                  {/* Top Bar Header */}
-                  <div className={`relative flex items-center justify-between px-6 py-5 ${
-                    isDark ? "border-b border-white/5" : ""
-                  }`}>
-                    <button
-                      onClick={() => setShowAddCard(false)}
-                      className={`p-2 rounded-xl transition-all active:scale-95 ${
-                        isDark 
-                          ? "bg-white/5 text-white/80 hover:bg-white/10 hover:text-white" 
-                          : "bg-transparent text-zinc-950 hover:text-zinc-700"
-                      }`}
-                    >
-                      <ChevronLeft className="h-6 w-6" />
-                    </button>
-                    <h1 className={`text-lg font-semibold tracking-wide ${isDark ? "text-white" : "text-zinc-950"}`}>Karta ma‘lumotlari</h1>
-                    <div className="w-9 h-9" />
-                  </div>
-
-                  {/* Form Content */}
-                  <main className="flex-1 px-6 py-8 flex flex-col justify-between max-w-md mx-auto w-full">
-                    <div className="space-y-6">
-                      {/* Card Number field with internal custom orange icon */}
-                      <div className="space-y-2">
-                        <div className={`relative flex items-center rounded-2xl border overflow-hidden transition-all duration-300 ${
-                          isDark 
-                            ? "bg-[#393939] border-white/5 focus-within:border-primary/50" 
-                            : "bg-zinc-100 border-transparent focus-within:bg-zinc-200"
-                        }`}>
-                          <span className="pl-4 shrink-0 flex items-center justify-center">
-                            <svg className="h-5 w-5 text-[#FF5A00]" viewBox="0 0 24 24" fill="currentColor">
-                              <rect x="2" y="5" width="20" height="14" rx="3" />
-                              <line x1="2" y1="10" x2="22" y2="10" stroke="white" strokeWidth="2" />
-                              <rect x="5" y="14" width="3" height="2" fill="white" />
-                            </svg>
-                          </span>
-                          <input
-                            type="text"
-                            value={newCardNumber}
-                            onChange={handleCardNumberChange}
-                            placeholder="Karta raqami"
-                            className={`w-full pl-3 pr-4 py-4 bg-transparent text-sm font-semibold tracking-wider outline-none ${
-                              isDark ? "text-white placeholder:text-white/30" : "text-zinc-900 placeholder:text-zinc-400"
-                            }`}
-                          />
-                        </div>
-                      </div>
-
-                      {/* Expiry field */}
-                      <div className="space-y-2">
-                        <div className={`relative flex items-center rounded-2xl border overflow-hidden w-36 transition-all duration-300 ${
-                          isDark 
-                            ? "bg-[#393939] border-white/5 focus-within:border-primary/50" 
-                            : "bg-zinc-100 border-transparent focus-within:bg-zinc-200"
-                        }`}>
-                          <input
-                            type="text"
-                            value={newCardExpiry}
-                            onChange={handleCardExpiryChange}
-                            placeholder="OO/YY"
-                            className={`w-full px-4 py-4 bg-transparent text-sm font-semibold tracking-wider outline-none ${
-                              isDark ? "text-white placeholder:text-white/30" : "text-zinc-900 placeholder:text-zinc-400"
-                            }`}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Bottom Submit Button */}
-                    <div className="pb-8">
-                      <button
-                        type="button"
-                        disabled={newCardNumber.length < 19 || newCardExpiry.length < 5}
-                        onClick={() => {
-                          setCardOtp(["", "", "", "", "", ""]);
-                          setShowCardOtp(true);
-                        }}
-                        className={`w-full py-4 rounded-3xl font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                          newCardNumber.length === 19 && newCardExpiry.length === 5
-                            ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/20 hover:bg-[#E05000] cursor-pointer"
-                            : isDark
-                              ? "bg-[#E25C00]/10 text-white/20 cursor-not-allowed"
-                              : "bg-[#FF5A00]/20 text-white cursor-not-allowed"
-                        }`}
-                      >
-                        Tasdiqlash
-                      </button>
-                    </div>
-                  </main>
-                </div>
-              ) : (
-                /* ==================== SCREEN 1: CARDS LIST VIEW ==================== */
-                <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"}`}>
-                  {/* Top Bar Header */}
-                  <div className={`relative flex items-center justify-between px-6 py-5 ${
-                    isDark ? "border-b border-white/5" : ""
-                  }`}>
-                    <button
-                      onClick={() => setShowCards(false)}
-                      className={`p-2 rounded-xl transition-all active:scale-95 ${
-                        isDark 
-                          ? "bg-white/5 text-white/80 hover:bg-white/10 hover:text-white" 
-                          : "bg-transparent text-zinc-950 hover:text-zinc-700"
-                      }`}
-                    >
-                      <ChevronLeft className="h-6 w-6" />
-                    </button>
-                    <h1 className={`text-lg font-semibold tracking-wide ${isDark ? "text-white" : "text-zinc-950"}`}>Sozlamalar</h1>
-                    <div className="w-9 h-9" />
-                  </div>
-
-                  {/* Content Container */}
-                  <main className="flex-1 overflow-y-auto px-6 py-8 pb-10 flex flex-col gap-6 max-w-md mx-auto w-full">
-                    {/* Render existing cards */}
-                    {userCards.map((card) => (
-                      <div
-                        key={card.id}
-                        onClick={() => setSelectedCardForDelete(card)}
-                        className={`w-full border rounded-[24px] p-6 flex flex-col justify-between h-44 relative overflow-hidden transition-all duration-300 cursor-pointer active:scale-98 ${
-                          isDark
-                            ? "border-white/15 bg-[#393939] hover:border-primary/55 shadow-2xl"
-                            : "border-slate-300 bg-white hover:border-slate-400 shadow-sm"
-                        }`}
-                      >
-                        <div className="flex justify-between items-start">
-                          {card.type === "humo" ? (
-                            <img
-                              src="/images/humo.png"
-                              alt="Humo Card"
-                              className="h-9 object-contain rounded"
-                            />
-                          ) : (
-                            <div className="flex items-center gap-2 text-primary font-black uppercase text-sm tracking-widest">
-                              <CreditCard className={`h-7 w-7 ${isDark ? "text-white" : "text-zinc-900"}`} />
-                              <span className={isDark ? "text-white" : "text-zinc-900"}>Uzcard</span>
-                            </div>
-                          )}
-                        </div>
-                        <p className={`text-[15px] font-semibold tracking-wide capitalize ${
-                          isDark ? "text-white/90" : "text-black"
-                        }`}>
-                          {card.name || fullName}
-                        </p>
-                        <p className={`text-[15px] font-semibold tracking-widest ${
-                          isDark ? "text-white/90" : "text-black"
-                        }`}>
-                          {card.number}
-                        </p>
-                      </div>
-                    ))}
-
-                    {/* Card 2: Empty Card with Add Button */}
-                    <div className={`w-full border rounded-[24px] p-6 flex flex-col justify-between h-44 transition-all duration-300 ${
-                      isDark
-                        ? "border-white/10 bg-[#393939]/20 hover:bg-[#393939]/30"
-                        : "border-primary bg-white hover:border-primary/80"
-                    }`}>
-                      <div className={`flex justify-between items-start ${isDark ? "text-white/60" : "text-primary"}`}>
-                        <CreditCard className="h-7 w-7" />
-                      </div>
-                      <div className="flex justify-start">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setNewCardNumber("");
-                            setNewCardExpiry("");
-                            setShowAddCard(true);
-                          }}
-                          className="flex items-center gap-2.5 px-6 py-3 rounded-full bg-[#FF5A00] hover:bg-[#E05000] text-white text-sm font-bold shadow-lg shadow-primary/20 transition-all active:scale-95 cursor-pointer"
-                        >
-                          <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white text-[#FF5A00] text-xs font-black">+</span>
-                          <span>Karta qo'shish</span>
-                        </button>
-                      </div>
-                    </div>
-                  </main>
-
-                  {/* Card Deletion Bottom Drawer (Sheet) matching Screenshot 1 */}
-                  {selectedCardForDelete && (
-                    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end justify-center transition-opacity duration-300 animate-fade-in">
-                      <div className="absolute inset-0" onClick={() => setSelectedCardForDelete(null)} />
-                      
-                      <div className={`w-full max-w-md rounded-t-[32px] px-6 pt-3 pb-8 flex flex-col items-center gap-4 z-10 animate-slide-up border-t relative ${
-                        isDark ? "bg-[#393939] border-white/5" : "bg-white border-zinc-200"
-                      }`}>
-                        {/* Notch indicator */}
-                        <div className={`w-12 h-1 rounded-full mb-2 ${isDark ? "bg-white/20" : "bg-zinc-200"}`} />
-                        
-                        {/* Title */}
-                        <p className={`text-base font-bold tracking-wide ${isDark ? "text-white" : "text-zinc-900"}`}>Bank kartasi</p>
-                        
-                        {/* Delete Button */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const idToDelete = selectedCardForDelete.id;
-                            setUserCards((prev) => prev.filter((c) => c.id !== idToDelete));
-                            setSelectedCardForDelete(null);
-                            showToast("Karta muvaffaqiyatli o'chirildi!");
-                          }}
-                          className="w-full py-4 rounded-2xl bg-[#E82C2C] hover:bg-red-700 text-white font-bold text-sm tracking-wide flex items-center justify-center gap-2 transition-all active:scale-98 shadow-lg shadow-red-600/10"
-                        >
-                          <Trash2 className="h-4.5 w-4.5" />
-                          <span>Kartani olib tashlash</span>
-                        </button>
-                        
-                        {/* Cancel Button */}
-                        <button
-                          type="button"
-                          onClick={() => setSelectedCardForDelete(null)}
-                          className={`w-full py-4 font-bold text-sm tracking-wide transition-all active:scale-98 ${
-                            isDark ? "text-white/60 hover:text-white" : "text-zinc-500 hover:text-zinc-800"
-                          }`}
-                        >
-                          Ortga
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          ) : showLanguages ? (
-            /* ==================== HIGH-FIDELITY REGISTERED LANGUAGE SETTINGS VIEW ==================== */
-            <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"}`}>
-              {/* Top Bar Header */}
-              <div className="relative flex items-center justify-between px-6 py-5">
-                <button
-                  onClick={() => setShowLanguages(false)}
-                  className={`p-2 rounded-xl transition-all active:scale-95 ${
-                    isDark ? "bg-white/5 text-white/80 hover:bg-white/10 hover:text-white" : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
-                  }`}
-                >
-                  <ChevronLeft className="h-5 w-5" />
-                </button>
-                <h1 className={`text-base font-bold tracking-wide ${isDark ? "text-white" : "text-zinc-900"}`}>Til sozlamalari</h1>
-                <div className="w-9 h-9" />
-              </div>
-
-              {/* Form Content */}
-              <main className="flex-1 px-6 py-6 flex flex-col justify-between max-w-md mx-auto w-full">
-                <div className="space-y-6">
-                  {/* Subtitle */}
-                  <div className="space-y-1 text-left">
-                    <h2 className={`text-xl font-bold tracking-tight leading-tight ${isDark ? "text-white" : "text-zinc-900"}`}>Ilovani o'zingizga qulay</h2>
-                    <p className={`text-xl font-bold tracking-tight leading-tight ${isDark ? "text-white/95" : "text-zinc-800"}`}>tilda boshqaring</p>
-                  </div>
-
-                  {/* Language Options Grid */}
-                  <div className="space-y-4">
-                    {[
-                      { code: "uz", label: "O'zbek tili", icon: "/icons/uzb.png" },
-                      { code: "en", label: "Ingliz tili", icon: "/icons/eng.png" },
-                      { code: "ru", label: "Rus tili", icon: "/icons/ru.png" }
-                    ].map((opt) => {
-                      const isSelected = tempLanguage === opt.code;
-                      return (
-                        <button
-                          key={opt.code}
-                          type="button"
-                          onClick={() => setTempLanguage(opt.code)}
-                          className={`w-full flex items-center justify-between p-5 rounded-[20px] transition-all duration-200 active:scale-98 text-left ${
-                            isSelected
-                              ? "bg-primary text-white shadow-lg shadow-primary/20"
-                              : isDark ? "bg-[#393939] text-white hover:bg-zinc-800" : "bg-zinc-100 text-zinc-900 hover:bg-zinc-200"
-                          }`}
-                        >
-                          <div className="flex items-center gap-4">
-                            <img
-                              src={opt.icon}
-                              alt={opt.label}
-                              className="w-10 h-10 object-cover rounded-full shadow-sm"
-                            />
-                            <span className="text-base font-bold tracking-wide">{opt.label}</span>
-                          </div>
-                          {isSelected && <Check className="h-5 w-5 text-white" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Bottom Confirm Button */}
-                <div className="pb-8">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedLang(tempLanguage);
-                      setShowLanguages(false);
-                      showToast("Til muvaffaqiyatli o'zgartirildi!");
-                    }}
-                    className="w-full py-4 rounded-2xl bg-primary hover:bg-primary-hover text-white font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg shadow-primary/20"
-                  >
-                    Tasdiqlash
-                  </button>
-                </div>
-              </main>
-            </div>
-          ) : showMessages ? (
+          {showMessages ? (
             /* ==================== HIGH-FIDELITY REGISTERED XABARLAR VIEW ==================== */
             <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"} animate-fade-in`}>
               {/* Top Bar Header */}
@@ -1505,266 +1071,44 @@ export default function LoginPage() {
                   <p className={`text-xl font-bold tracking-tight leading-tight ${isDark ? "text-white/95" : "text-zinc-800"}`}>kuzatib boring</p>
                 </div>
 
-                {/* Notifications Grouped List */}
-                <div className="space-y-6">
-                  {/* Group 1: Today */}
-                  <div className="space-y-3.5">
-                    <h3 className={`text-base font-bold tracking-wide ${isDark ? "text-white" : "text-zinc-800"}`}>Today</h3>
-                    
-                    {/* Unread Card (warm brown tint, unread red dot) */}
-                    <div className={`w-full border rounded-3xl p-5 flex items-start gap-4 relative shadow-lg ${
-                      isDark ? "bg-[#221A15] border-white/5" : "bg-orange-50/50 border-orange-100"
-                    }`}>
-                      {/* Red unread dot */}
-                      <span className="absolute top-3.5 right-3.5 w-2 h-2 rounded-full bg-[#E53E3E]" />
-                      
-                      {/* Stylized Logo circular container */}
-                      <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center shrink-0 shadow-md">
-                        <img
-                          src="/logo-loading.png"
-                          alt="B"
-                          className="w-7 h-7 object-contain"
-                        />
-                      </div>
-                      
-                      {/* Content text */}
-                      <div className="space-y-1 pr-2">
-                        <h4 className={`text-sm font-bold leading-snug ${isDark ? "text-white" : "text-zinc-900"}`}>
-                          Bazmly just got better! 🚀
-                        </h4>
-                        <p className={`text-xs leading-normal ${isDark ? "text-white/80" : "text-zinc-650"}`}>
-                          Check out our latest update now
-                        </p>
-                        <p className={`text-[10px] font-semibold pt-1 ${isDark ? "text-white/45" : "text-zinc-400"}`}>
-                          20.01.2026, 18:00
-                        </p>
-                      </div>
-                    </div>
+                {notificationsError ? (
+                  <p className="text-xs font-bold text-red-500">{notificationsError}</p>
+                ) : notifications === null ? (
+                  <div className="flex justify-center py-10">
+                    <Loader2 className="h-6 w-6 animate-spin text-primary" />
                   </div>
-
-                  <hr className={`border-t my-1 ${isDark ? "border-white/5" : "border-zinc-200"}`} />
-
-                  {/* Group 2: This Week */}
+                ) : notifications.length === 0 ? (
+                  <p className={`text-sm text-center py-10 ${isDark ? "text-white/50" : "text-zinc-500"}`}>Hozircha xabarlar yo&apos;q</p>
+                ) : (
                   <div className="space-y-3.5">
-                    <h3 className={`text-base font-bold tracking-wide ${isDark ? "text-white" : "text-zinc-800"}`}>This Week</h3>
-                    
-                    {/* Read Card 1 (dark grey bg) */}
-                    <div className={`w-full border rounded-3xl p-5 flex items-start gap-4 shadow-lg ${
-                      isDark ? "bg-[#393939] border-white/5" : "bg-zinc-100 border-zinc-200"
-                    }`}>
-                      <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center shrink-0 shadow-md">
-                        <img
-                          src="/logo-loading.png"
-                          alt="B"
-                          className="w-7 h-7 object-contain"
-                        />
-                      </div>
-                      
-                      <div className="space-y-1">
-                        <h4 className={`text-sm font-bold leading-snug ${isDark ? "text-white" : "text-zinc-900"}`}>
-                          Bazmly just got better! 🚀
-                        </h4>
-                        <p className={`text-xs leading-normal ${isDark ? "text-white/80" : "text-zinc-650"}`}>
-                          Check out our latest update now
-                        </p>
-                        <p className={`text-[10px] font-semibold pt-1 ${isDark ? "text-white/45" : "text-zinc-400"}`}>
-                          20.01.2026, 18:00
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Read Card 2 (dark grey bg) */}
-                    <div className={`w-full border rounded-3xl p-5 flex items-start gap-4 shadow-lg ${
-                      isDark ? "bg-[#393939] border-white/5" : "bg-zinc-100 border-zinc-200"
-                    }`}>
-                      <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center shrink-0 shadow-md">
-                        <img
-                          src="/logo-loading.png"
-                          alt="B"
-                          className="w-7 h-7 object-contain"
-                        />
-                      </div>
-                      
-                      <div className="space-y-1">
-                        <h4 className={`text-sm font-bold leading-snug ${isDark ? "text-white" : "text-zinc-900"}`}>
-                          Bazmly just got better! 🚀
-                        </h4>
-                        <p className={`text-xs leading-normal ${isDark ? "text-white/80" : "text-zinc-650"}`}>
-                          Check out our latest update now
-                        </p>
-                        <p className={`text-[10px] font-semibold pt-1 ${isDark ? "text-white/45" : "text-zinc-400"}`}>
-                          20.01.2026, 18:00
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <hr className={`border-t my-1 ${isDark ? "border-white/5" : "border-zinc-200"}`} />
-
-                  {/* Group 3: This Month */}
-                  <div className="space-y-3.5">
-                    <h3 className={`text-base font-bold tracking-wide ${isDark ? "text-white" : "text-zinc-800"}`}>This Month</h3>
-
-                    {/* Read Card 3 (dark grey bg, different date) */}
-                    <div className={`w-full border rounded-3xl p-5 flex items-start gap-4 shadow-lg ${
-                      isDark ? "bg-[#393939] border-white/5" : "bg-zinc-100 border-zinc-200"
-                    }`}>
-                      <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center shrink-0 shadow-md">
-                        <img
-                          src="/logo-loading.png"
-                          alt="B"
-                          className="w-7 h-7 object-contain"
-                        />
-                      </div>
-                      
-                      <div className="space-y-1">
-                        <h4 className={`text-sm font-bold leading-snug ${isDark ? "text-white" : "text-zinc-900"}`}>
-                          Bazmly just got better! 🚀
-                        </h4>
-                        <p className={`text-xs leading-normal ${isDark ? "text-white/80" : "text-zinc-650"}`}>
-                          Check out our latest update now
-                        </p>
-                        <p className={`text-[10px] font-semibold pt-1 ${isDark ? "text-white/45" : "text-zinc-400"}`}>
-                          12.01.2026, 15:30
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </main>
-            </div>
-          ) : showHistory ? (
-            /* ==================== HIGH-FIDELITY REGISTERED BOOKINGS HISTORY VIEW ==================== */
-            <div className={`flex flex-col flex-1 bg-[var(--background)] ${isDark ? "text-white" : "text-zinc-900"}`}>
-              {/* Top Bar Header */}
-              <div className={`relative flex items-center justify-between px-6 py-5 border-b ${
-                isDark ? "border-white/5" : "border-zinc-100"
-              }`}>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setShowHistory(false)}
-                    className={`p-2 rounded-xl transition-all active:scale-95 ${
-                      isDark ? "bg-white/5 text-white/80 hover:bg-white/10 hover:text-white" : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
-                    }`}
-                  >
-                    <ChevronLeft className="h-5 w-5" />
-                  </button>
-                  <h1 className={`text-xl font-bold tracking-wide ${isDark ? "text-white" : "text-zinc-900"}`}>Band qilingan</h1>
-                </div>
-                
-                {/* Location pin with Toshkent */}
-                <div className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border ${
-                  isDark 
-                    ? "text-white/80 bg-white/5 border-white/5" 
-                    : "text-zinc-800 bg-zinc-100 border-zinc-200"
-                }`}>
-                  <MapPin className="h-4 w-4 text-primary shrink-0" />
-                  <span>Toshkent</span>
-                </div>
-              </div>
-
-              {/* Scrollable Bookings List */}
-              <main className="flex-1 overflow-y-auto px-6 py-6 pb-2 flex flex-col gap-6 max-w-md mx-auto w-full text-left">
-                {[
-                  { id: "1", showBanner: true },
-                  { id: "2", showBanner: false }
-                ].map((item) => (
-                  <div
-                    key={item.id}
-                    className={`w-full rounded-3xl p-5 flex flex-col gap-4 transition-all duration-300 ${
-                      isDark
-                        ? "bg-[#393939] border border-white/5 shadow-xl hover:border-white/10"
-                        : "bg-white border border-[#FF6B00] shadow-md hover:shadow-lg hover:border-primary/80"
-                    }`}
-                  >
-                    {/* Top Restaurant Detail */}
-                    <div className="flex items-start gap-4">
-                      {/* Rounded restaurant image */}
-                      <img
-                        src="/images/restaurant.png"
-                        alt="Rest One"
-                        className={`w-20 h-20 rounded-2xl object-cover shrink-0 border shadow-md ${
-                          isDark ? "border-white/5" : "border-zinc-100"
+                    {notifications.map((n) => (
+                      <div
+                        key={n.id}
+                        className={`w-full border rounded-3xl p-5 flex items-start gap-4 relative shadow-lg ${
+                          !n.read_at
+                            ? isDark
+                              ? "bg-[#221A15] border-white/5"
+                              : "bg-orange-50/50 border-orange-100"
+                            : isDark
+                              ? "bg-[#393939] border-white/5"
+                              : "bg-zinc-100 border-zinc-200"
                         }`}
-                      />
-                      
-                      <div className="space-y-1 pr-1 w-full min-w-0">
-                        <h2 className={`text-base font-bold tracking-wide truncate ${
-                          isDark ? "text-white" : "text-zinc-900"
-                        }`}>Rest One</h2>
-                        
-                        {/* Distance & Status info */}
-                        <div className={`flex items-center gap-1.5 text-xs font-medium ${
-                          isDark ? "text-white/50" : "text-zinc-500"
-                        }`}>
-                          <MapPin className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                          <span>1 km</span>
-                          <span className={isDark ? "text-white/20" : "text-zinc-300"}>|</span>
-                          <span className="w-1.5 h-1.5 rounded-full bg-[#10B981] shrink-0" />
-                          <span className="text-[#10B981] font-bold">Ochiq</span>
+                      >
+                        {!n.read_at && <span className="absolute top-3.5 right-3.5 w-2 h-2 rounded-full bg-[#E53E3E]" />}
+                        <div className="w-12 h-12 rounded-full bg-primary flex items-center justify-center shrink-0 shadow-md">
+                          <Bell className="w-6 h-6 text-white" />
                         </div>
-
-                        {/* Phone */}
-                        <div className={`flex items-center gap-1.5 text-xs font-medium ${
-                          isDark ? "text-white/60" : "text-zinc-650"
-                        }`}>
-                          <Phone className={`h-3.5 w-3.5 shrink-0 ${isDark ? "text-white/40" : "text-zinc-400"}`} />
-                          <span>+998 99 123 45 67</span>
-                        </div>
-
-                        {/* Address */}
-                        <div className={`flex items-center gap-1.5 text-xs font-medium truncate ${
-                          isDark ? "text-white/60" : "text-zinc-650"
-                        }`}>
-                          <MapPin className={`h-3.5 w-3.5 shrink-0 ${isDark ? "text-white/40" : "text-zinc-400"}`} />
-                          <span className="truncate">Umid qo'rg'oni 765 - uy</span>
+                        <div className="space-y-1">
+                          <h4 className={`text-sm font-bold leading-snug ${isDark ? "text-white" : "text-zinc-900"}`}>{n.title}</h4>
+                          {n.body && <p className={`text-xs leading-normal ${isDark ? "text-white/80" : "text-zinc-650"}`}>{n.body}</p>}
+                          <p className={`text-[10px] font-semibold pt-1 ${isDark ? "text-white/45" : "text-zinc-400"}`}>
+                            {new Date(n.sent_at).toLocaleString("uz-UZ")}
+                          </p>
                         </div>
                       </div>
-                    </div>
-
-                    {/* Horizontal Divider */}
-                    <hr className={`border-t ${isDark ? "border-white/5" : "border-zinc-100"}`} />
-
-                    {/* Booking metadata table */}
-                    <div className="space-y-2.5 text-xs font-semibold">
-                      <div className="flex justify-between items-center">
-                        <span className={isDark ? "text-white/40" : "text-zinc-400"}>Holat</span>
-                        <span className={`font-bold ${isDark ? "text-white" : "text-zinc-900"}`}>Band qilish tasdiqlandi</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className={isDark ? "text-white/40" : "text-zinc-400"}>Chek raqami:</span>
-                        <span className={`font-mono ${isDark ? "text-white/90" : "text-zinc-900"}`}>0789 091172</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className={isDark ? "text-white/40" : "text-zinc-400"}>Belgilandi:</span>
-                        <span className={isDark ? "text-white/90" : "text-zinc-900"}>11:00 • 26/02/2024</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className={isDark ? "text-white/40" : "text-zinc-400"}>Stol raqami:</span>
-                        <span className={isDark ? "text-white/90" : "text-zinc-900"}>4 - stol</span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className={isDark ? "text-white/40" : "text-zinc-400"}>Restoran raqami:</span>
-                        <span className={isDark ? "text-white/90" : "text-zinc-900"}>+998 99 123 45 67</span>
-                      </div>
-                    </div>
-
-                    {/* Bottom orange banner with clock for Card 1 */}
-                    {item.showBanner && (
-                      <div className={`w-full rounded-2xl py-3.5 px-4 flex items-center justify-between text-sm font-bold ${
-                        isDark 
-                          ? "bg-[#FF6B00] text-white shadow-md animate-pulse" 
-                          : "bg-white border border-[#FF6B00] text-[#FF6B00]"
-                      }`}>
-                        <span className={isDark ? "text-white" : "text-[#FF6B00] opacity-80 font-medium"}>Qoldi:</span>
-                        <div className="flex items-center gap-2">
-                          <Clock className={`h-4.5 w-4.5 shrink-0 ${isDark ? "text-white" : "text-[#FF6B00]"}`} />
-                          <span>2 soat 25 daqiqa</span>
-                        </div>
-                      </div>
-                    )}
+                    ))}
                   </div>
-                ))}
+                )}
               </main>
             </div>
           ) : showHelp ? (
@@ -1904,11 +1248,13 @@ export default function LoginPage() {
                 {/* Circle Avatar with Camera/Plus icon */}
                 <div className="relative mb-8 mt-2">
                   <div className="w-36 h-36 rounded-full overflow-hidden border-2 border-white/10 shadow-2xl bg-zinc-800">
-                    <img
-                      src="/images/profil.jpg"
-                      alt="User Portrait"
-                      className="w-full h-full object-cover"
-                    />
+{user?.avatar_url ? (
+                      <img src={user.avatar_url} alt={fullName} className="w-full h-full object-cover" />
+                    ) : (
+                      <span className="w-full h-full flex items-center justify-center text-4xl font-black text-primary bg-primary/10">
+                        {(user?.first_name?.[0] ?? "") + (user?.last_name?.[0] ?? "")}
+                      </span>
+                    )}
                   </div>
                   <div className="absolute bottom-1 right-1 bg-white text-zinc-800 p-2.5 rounded-full shadow-lg border border-white/10 cursor-pointer hover:bg-zinc-100 transition-colors flex items-center justify-center">
                     <svg className="h-4.5 w-4.5 text-zinc-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1942,34 +1288,12 @@ export default function LoginPage() {
                     <input
                       type="text"
                       value={editPhone}
-                      onChange={(e) => setEditPhone(e.target.value)}
-                      placeholder="+998 99 219 19 55"
+                      readOnly
+                      title="Telefon raqami akkauntga bog'langan va bu yerda o'zgarmaydi"
                       className={`w-full px-4 py-3.5 rounded-xl border text-sm font-medium outline-none focus:border-primary/50 transition-colors ${
                         isDark ? "border-white/10 bg-[#393939] text-white" : "border-zinc-200 bg-zinc-100 text-zinc-900 focus:bg-white"
                       }`}
                     />
-                  </div>
-
-                  {/* Location field */}
-                  <div className="space-y-2 text-left">
-                    <label className={`block text-xs font-semibold ${isDark ? "text-zinc-400" : "text-zinc-500"}`}>Manzil</label>
-                    <div className="relative">
-                      <select
-                        value={editLocation}
-                        onChange={(e) => setEditLocation(e.target.value)}
-                        className={`w-full px-4 py-3.5 pr-10 rounded-xl border text-sm font-medium outline-none focus:border-primary/50 transition-colors appearance-none cursor-pointer ${
-                          isDark ? "border-white/10 bg-[#393939] text-white" : "border-zinc-200 bg-zinc-100 text-zinc-900"
-                        }`}
-                      >
-                        <option value="Tashkent, Tashkent city">Toshkent</option>
-                        <option value="Samarkand, Samarkand region">Samarqand</option>
-                        <option value="Bukhara, Bukhara region">Buxoro</option>
-                        <option value="Andijan, Andijan region">Andijon</option>
-                      </select>
-                      <div className="absolute inset-y-0 right-4 flex items-center pointer-events-none text-zinc-400">
-                        <ChevronDown className="h-4.5 w-4.5" />
-                      </div>
-                    </div>
                   </div>
 
                   {/* Danger zone */}
@@ -2016,11 +1340,13 @@ export default function LoginPage() {
                         ? "border-4 border-primary/20 bg-zinc-800 shadow-2xl" 
                         : "bg-zinc-150 shadow-md"
                     }`}>
-                      <img
-                        src="/images/profil.jpg"
-                        alt="User Portrait"
-                        className="w-full h-full object-cover"
-                      />
+{user?.avatar_url ? (
+                      <img src={user.avatar_url} alt={fullName} className="w-full h-full object-cover" />
+                    ) : (
+                      <span className="w-full h-full flex items-center justify-center text-4xl font-black text-primary bg-primary/10">
+                        {(user?.first_name?.[0] ?? "") + (user?.last_name?.[0] ?? "")}
+                      </span>
+                    )}
                     </div>
                     {isDark && (
                       <div className="absolute bottom-0 right-1 bg-primary text-white p-2.5 rounded-full shadow-lg border-2 border-brand-dark">
@@ -2031,13 +1357,12 @@ export default function LoginPage() {
 
                   <div className="mt-5 space-y-1.5">
                     <h2 className={`text-2xl font-bold tracking-tight ${isDark ? "text-white" : "text-black"}`}>
-                      {fullName || "Alisher Raimov"}
+                      {fullName}
                     </h2>
                     <div className={`flex items-center justify-center gap-2 ${
                       isDark ? "text-xs font-medium text-white/60" : "text-base font-semibold text-black"
                     }`}>
-                      <MapPin className={isDark ? "h-4 w-4 text-primary" : "h-5.5 w-5.5 text-black"} />
-                      <span>{isDark ? location.split(",")[0] : location}</span>
+                      <span>{user?.phone ?? ""}</span>
                     </div>
                   </div>
 
@@ -2069,7 +1394,7 @@ export default function LoginPage() {
 
                 {/* Only inside Telegram, and only until a number is stored. */}
                 <div className="w-full">
-                  <TelegramPhonePrompt hasPhone={Boolean(phone)} />
+                  <TelegramPhonePrompt hasPhone={Boolean(user?.phone)} />
                 </div>
 
                 {/* Options List Dashboard Container */}
@@ -2377,7 +1702,7 @@ export default function LoginPage() {
                   type="button"
                   onClick={() => {
                     setActiveModal(null);
-                    handleLogout();
+                    handleDeleteAccount();
                   }}
                   className="w-full py-4 rounded-2xl bg-[#E82C2C] hover:bg-red-700 text-white font-bold text-sm tracking-wide flex items-center justify-center gap-2 transition-all active:scale-98 shadow-lg shadow-red-600/10"
                 >
@@ -2415,7 +1740,7 @@ export default function LoginPage() {
               {/* Wizard Navigation Header */}
               {step !== 1 && step !== 2 && (
                 <div className="flex justify-end mb-4">
-                  {["register_customer", "register_customer_password", "register_customer_name"].includes(String(step)) ? (
+                  {["register_customer", "register_customer_phone_otp", "register_customer_email_otp", "register_customer_name"].includes(String(step)) ? (
                     <button
                       onClick={() => setStep(2)}
                       className={`p-2 rounded-xl transition-colors cursor-pointer ${
@@ -2678,67 +2003,13 @@ export default function LoginPage() {
                         />
                       </div>
 
-                      {/* Apple and Google Continuation Buttons */}
-                      <div className="space-y-3 pt-2">
-                        {/* Google Button */}
-                        <button
-                          type="button"
-                          onClick={() => showToast("Google orqali kirish simulyatsiya qilindi")}
-                          className={`w-full flex items-center justify-center gap-2.5 py-3 rounded-2xl border text-xs font-bold transition-all active:scale-98 cursor-pointer ${
-                            isDark 
-                              ? "bg-[#2C2C2E]/60 hover:bg-[#3A3A3C] border-white/10 text-white" 
-                              : "bg-white hover:bg-zinc-50 border-zinc-200 text-zinc-800"
-                          }`}
-                        >
-                          <svg className="h-4.5 w-4.5" viewBox="0 0 24 24">
-                            <path
-                              fill="#4285F4"
-                              d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                            />
-                            <path
-                              fill="#34A853"
-                              d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                            />
-                            <path
-                              fill="#FBBC05"
-                              d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                            />
-                            <path
-                              fill="#EA4335"
-                              d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                            />
-                          </svg>
-                          <span>Continue with Google</span>
-                        </button>
-
-                        {/* Apple Button */}
-                        <button
-                          type="button"
-                          onClick={() => showToast("Apple orqali kirish simulyatsiya qilindi")}
-                          className={`w-full flex items-center justify-center gap-2.5 py-3 rounded-2xl border text-xs font-bold transition-all active:scale-98 cursor-pointer ${
-                            isDark 
-                              ? "bg-[#2C2C2E]/60 hover:bg-[#3A3A3C] border-white/10 text-white" 
-                              : "bg-white hover:bg-zinc-50 border-zinc-200 text-zinc-800"
-                          }`}
-                        >
-                          <Apple className="h-4.5 w-4.5" />
-                          <span>Continue with Apple</span>
-                        </button>
-                      </div>
                     </div>
 
                     <div className="space-y-4">
                       {/* Orange Action Button */}
                       <button
                         type="button"
-                        onClick={() => {
-                          if (phone.length < 9) {
-                            setError("Telefon raqamingizni to'liq kiriting!");
-                            return;
-                          }
-                          setError("");
-                          void handlePhoneContinue();
-                        }}
+                        onClick={handlePhoneCheckAndContinue}
                         className={`w-full py-3.5 rounded-[20px] font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
                           phone.length === 9
                             ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer hover:bg-[#E04F00]"
@@ -2747,7 +2018,7 @@ export default function LoginPage() {
                               : "bg-[#FF5A00]/20 text-[#FF5A00]/45 cursor-not-allowed"
                         }`}
                       >
-                        Akkaunt yaratish
+                        Davom etish
                       </button>
 
 
@@ -2755,65 +2026,11 @@ export default function LoginPage() {
                   </div>
                 )}
 
-                {/* Step "register_customer_password": a returning customer */}
-                {step === "register_customer_password" && (
-                  <div className="flex-1 flex flex-col justify-between animate-scale-up space-y-6">
-                    <div className="space-y-5">
-                      <div className="text-left space-y-1">
-                        <div className="flex items-center gap-1.5 -ml-2">
-                          <button
-                            type="button"
-                            onClick={handleBackStep}
-                            className="p-1 rounded-lg transition-colors cursor-pointer text-zinc-950 dark:text-white hover:opacity-75"
-                          >
-                            <ChevronLeft className="h-7 w-7 stroke-[2.5px]" />
-                          </button>
-                          <h2 className={`text-2xl font-extrabold ${isDark ? "text-white" : "text-black"}`}>Parol</h2>
-                        </div>
-                        <p className={`text-sm ${isDark ? "text-white/60" : "text-zinc-500"} pl-7`}>
-                          +998 {formatPhone(phone)} uchun parolni kiriting
-                        </p>
-                      </div>
+                {/* Step "register_customer_phone_otp": Phone OTP verification */}
 
-                      {error && (
-                        <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-3 text-xs text-red-400 text-center font-bold">
-                          {error}
-                        </div>
-                      )}
+                {/* Step "register_customer_email_otp": Email OTP verification */}
 
-                      <input
-                        type="password"
-                        value={password}
-                        onChange={(e) => setPassword(e.target.value)}
-                        placeholder="Parol"
-                        autoComplete="current-password"
-                        className={`w-full px-4 py-3.5 rounded-2xl border transition-all outline-none ${
-                          isDark
-                            ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]"
-                            : "bg-zinc-50 border-zinc-200 text-black focus:border-[#FF5A00]"
-                        } text-sm font-bold tracking-wide`}
-                      />
-                    </div>
-
-                    <div className="space-y-4">
-                      <button
-                        type="button"
-                        disabled={loading || !password.trim()}
-                        onClick={() => void handlePasswordSubmit()}
-                        className={`w-full py-3.5 rounded-[20px] font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                          password.trim() && !loading
-                            ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer hover:bg-[#E04F00]"
-                            : isDark
-                              ? "bg-white/10 text-white/30 cursor-not-allowed"
-                              : "bg-[#FF5A00]/20 text-[#FF5A00]/45 cursor-not-allowed"
-                        }`}
-                      >
-                        {loading ? "Tekshirilmoqda..." : "Kirish"}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
+                {/* Step "register_customer_name": Name entry screen */}
                 {step === "register_customer_name" && (
                   <div className="flex-1 flex flex-col justify-between animate-scale-up space-y-6">
                     <div className="space-y-5">
@@ -2826,9 +2043,9 @@ export default function LoginPage() {
                           >
                             <ChevronLeft className="h-7 w-7 stroke-[2.5px]" />
                           </button>
-                          <h2 className={`text-2xl font-extrabold ${isDark ? "text-white" : "text-black"}`}>Ro&apos;yxatdan o&apos;tish</h2>
+                          <h2 className={`text-2xl font-extrabold ${isDark ? "text-white" : "text-black"}`}>Ism va familiya</h2>
                         </div>
-                        <p className={`text-sm ${isDark ? "text-white/60" : "text-zinc-500"} pl-7`}>Ism, familiya va parolni kiriting</p>
+                        <p className={`text-sm ${isDark ? "text-white/60" : "text-zinc-500"} pl-7`}>Ismingizni kiriting</p>
                       </div>
 
                       {error && (
@@ -2837,28 +2054,15 @@ export default function LoginPage() {
                         </div>
                       )}
 
-                      {/* Name, surname and password — the whole registration */}
+                      {/* Name Input Box */}
                       <input
                         type="text"
-                        value={firstName}
-                        onChange={(e) => setFirstName(e.target.value)}
-                        placeholder="Ismingiz"
-                        autoComplete="given-name"
+                        value={fullName}
+                        onChange={(e) => setFullName(e.target.value)}
+                        placeholder="Ism va familiyangiz"
                         className={`w-full px-4 py-3.5 rounded-2xl border transition-all outline-none ${
-                          isDark
-                            ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]"
-                            : "bg-zinc-50 border-zinc-200 text-black focus:border-[#FF5A00]"
-                        } text-sm font-bold tracking-wide`}
-                      />
-                      <input
-                        type="text"
-                        value={lastName}
-                        onChange={(e) => setLastName(e.target.value)}
-                        placeholder="Familiyangiz"
-                        autoComplete="family-name"
-                        className={`w-full px-4 py-3.5 rounded-2xl border transition-all outline-none ${
-                          isDark
-                            ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]"
+                          isDark 
+                            ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]" 
                             : "bg-zinc-50 border-zinc-200 text-black focus:border-[#FF5A00]"
                         } text-sm font-bold tracking-wide`}
                       />
@@ -2866,8 +2070,7 @@ export default function LoginPage() {
                         type="password"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        placeholder="Parol (kamida 6 ta belgi)"
-                        autoComplete="new-password"
+                        placeholder="Parol (kamida 8 belgi)"
                         className={`w-full px-4 py-3.5 rounded-2xl border transition-all outline-none ${
                           isDark
                             ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]"
@@ -2880,20 +2083,20 @@ export default function LoginPage() {
                       {/* Next/Finish Register Button */}
                       <button
                         type="button"
-                        disabled={loading}
-                        onClick={() => void handleCustomerFinalRegister()}
+                        onClick={() => {
+                          setError("");
+                          handleCustomerFinalRegister();
+                        }}
                         className={`w-full py-3.5 rounded-[20px] font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                          firstName.trim() && lastName.trim() && password.trim().length >= 6 && !loading
+                          fullName.trim()
                             ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer hover:bg-[#E04F00]"
                             : isDark
                               ? "bg-white/10 text-white/30 cursor-not-allowed"
                               : "bg-[#FF5A00]/20 text-[#FF5A00]/45 cursor-not-allowed"
                         }`}
                       >
-                        Tasdiqlash
+                        {loading ? "Yuborilmoqda..." : "Ro'yxatdan o'tish"}
                       </button>
-
-
                     </div>
                   </div>
                 )}
@@ -3021,6 +2224,24 @@ export default function LoginPage() {
                             </span>
                             <ChevronRight className="h-4.5 w-4.5 opacity-60 text-zinc-400" />
                           </button>
+                          <div className="grid grid-cols-3 gap-2">
+                            <input
+                              value={partnerStreet}
+                              onChange={(e) => setPartnerStreet(e.target.value)}
+                              placeholder="Ko'cha"
+                              className={`col-span-2 w-full px-4 py-3.5 rounded-2xl border transition-all outline-none text-sm font-bold ${
+                                isDark ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]" : "bg-white border-zinc-200 text-black focus:border-[#FF5A00]"
+                              }`}
+                            />
+                            <input
+                              value={partnerHouse}
+                              onChange={(e) => setPartnerHouse(e.target.value)}
+                              placeholder="Uy"
+                              className={`w-full px-4 py-3.5 rounded-2xl border transition-all outline-none text-sm font-bold ${
+                                isDark ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]" : "bg-white border-zinc-200 text-black focus:border-[#FF5A00]"
+                              }`}
+                            />
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -3032,10 +2253,6 @@ export default function LoginPage() {
                         onClick={() => {
                           if (!venueName.trim()) {
                             setError("Iltimos joyingiz nomini kiriting!");
-                            return;
-                          }
-                          if (!reg || !dist) {
-                            setError("Iltimos manzilni kiriting!");
                             return;
                           }
                           setError("");
@@ -3072,44 +2289,39 @@ export default function LoginPage() {
                       </div>
 
                       <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1 text-left">
-                        {[
-                          "Toshkent sh.",
-                          "Toshkent vil.",
-                          "Samarqand",
-                          "Buxoro",
-                          "Farg'ona",
-                          "Andijon",
-                          "Namangan",
-                          "Navoiy",
-                          "Jizzax",
-                          "Sirdaryo",
-                          "Qashqadaryo",
-                          "Surxondaryo",
-                          "Xorazm",
-                          "Qoraqalpog'iston Resp."
-                        ].map((regionName) => {
-                          const isSelected = reg === regionName;
-                          return (
-                            <button
-                              key={regionName}
-                              type="button"
-                              onClick={() => {
-                                setReg(regionName);
-                                setStep("district");
-                              }}
-                              className={`w-full flex items-center justify-between p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                                isSelected
-                                  ? "bg-[#FF5A00]/10 border-[#FF5A00] font-bold text-[#FF5A00]"
-                                  : isDark
-                                    ? "bg-[#2C2C2E]/60 border-white/5 hover:bg-[#3A3A3C] text-white"
-                                    : "bg-zinc-50 border-zinc-200 hover:bg-zinc-100 text-zinc-900"
-                              }`}
-                            >
-                              <span>{regionName}</span>
-                              <ChevronRight className="h-4 w-4 opacity-50" />
-                            </button>
-                          );
-                        })}
+                        {partnerRegions.length > 0 ? (
+                          partnerRegions.map((region) => {
+                            const isSelected = selectedPartnerRegionId === region.id;
+                            return (
+                              <button
+                                key={region.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedPartnerRegionId(region.id);
+                                  setReg(region.name);
+                                  setDist("");
+                                  setSelectedPartnerDistrictId(null);
+                                  setStep("district");
+                                }}
+                                className={`w-full flex items-center justify-between p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                  isSelected
+                                    ? "bg-[#FF5A00]/10 border-[#FF5A00] font-bold text-[#FF5A00]"
+                                    : isDark
+                                      ? "bg-[#2C2C2E]/60 border-white/5 hover:bg-[#3A3A3C] text-white"
+                                      : "bg-zinc-50 border-zinc-200 hover:bg-zinc-100 text-zinc-900"
+                                }`}
+                              >
+                                <span>{region.name}</span>
+                                <ChevronRight className="h-4 w-4 opacity-50" />
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <div className="py-8 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                            <Loader2 className="h-4 w-4 animate-spin text-[#FF5A00]" />
+                            <span>Viloyatlar yuklanmoqda...</span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -3138,36 +2350,39 @@ export default function LoginPage() {
                       </div>
 
                       <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1 text-left">
-                        {(reg === "Toshkent sh."
-                          ? ["Chilonzor", "Yunusobod", "Mirzo Ulug'bek", "Mirobod", "Yakkasaroy", "Shayxontohur", "Olmazor", "Sergeli", "Yashnobod", "Uchtepa"]
-                          : reg === "Toshkent vil."
-                          ? ["Zangiota", "Qibray", "Chirchiq", "Yangiyo'l", "Bo'stonliq", "Parkent", "O'rtachirchiq"]
-                          : reg === "Samarqand"
-                          ? ["Samarqand sh.", "Pastdarg'om", "Urgut", "Toyloq", "Bulung'ur", "Kattaqo'rg'on"]
-                          : ["Markaziy tuman", "Shimoliy tuman", "G'arbiy tuman", "Janubiy tuman"]
-                        ).map((districtName) => {
-                          const isSelected = dist === districtName;
-                          return (
-                            <button
-                              key={districtName}
-                              type="button"
-                              onClick={() => {
-                                setDist(districtName);
-                                setStep(3);
-                              }}
-                              className={`w-full flex items-center justify-between p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                                isSelected
-                                  ? "bg-[#FF5A00]/10 border-[#FF5A00] font-bold text-[#FF5A00]"
-                                  : isDark
-                                    ? "bg-[#2C2C2E]/60 border-white/5 hover:bg-[#3A3A3C] text-white"
-                                    : "bg-zinc-50 border-zinc-200 hover:bg-zinc-100 text-zinc-900"
-                              }`}
-                            >
-                              <span>{districtName}</span>
-                              <Check className={`h-4 w-4 text-[#FF5A00] ${isSelected ? "opacity-100" : "opacity-0"}`} />
-                            </button>
-                          );
-                        })}
+                        {loadingPartnerDistricts ? (
+                          <div className="py-8 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                            <Loader2 className="h-4 w-4 animate-spin text-[#FF5A00]" />
+                            <span>Tumanlar yuklanmoqda...</span>
+                          </div>
+                        ) : partnerDistricts.length > 0 ? (
+                          partnerDistricts.map((district) => {
+                            const isSelected = selectedPartnerDistrictId === district.id;
+                            return (
+                              <button
+                                key={district.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedPartnerDistrictId(district.id);
+                                  setDist(district.name);
+                                  setStep(3);
+                                }}
+                                className={`w-full flex items-center justify-between p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                  isSelected
+                                    ? "bg-[#FF5A00]/10 border-[#FF5A00] font-bold text-[#FF5A00]"
+                                    : isDark
+                                      ? "bg-[#2C2C2E]/60 border-white/5 hover:bg-[#3A3A3C] text-white"
+                                      : "bg-zinc-50 border-zinc-200 hover:bg-zinc-100 text-zinc-900"
+                                }`}
+                              >
+                                <span>{district.name}</span>
+                                <Check className={`h-4 w-4 text-[#FF5A00] ${isSelected ? "opacity-100" : "opacity-0"}`} />
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <p className="py-6 text-center text-xs text-zinc-400">Tumanlar topilmadi</p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -3377,91 +2592,6 @@ export default function LoginPage() {
                   </div>
                 )}
 
-                {/* Step 5: Mock Gallery Upload */}
-                {step === 5 && (
-                  <div className="space-y-4 flex-1 flex flex-col justify-between animate-scale-up">
-                    <div className="space-y-4">
-                      <div className="space-y-1.5 text-left">
-                        <div className="flex items-center gap-1.5 -ml-2">
-                          <button
-                            type="button"
-                            onClick={handleBackStep}
-                            className="p-1 rounded-lg transition-colors cursor-pointer text-zinc-950 dark:text-white hover:opacity-75"
-                          >
-                            <ChevronLeft className="h-7 w-7 stroke-[2.5px]" />
-                          </button>
-                          <h2 className={`text-2xl font-extrabold ${isDark ? "text-white" : "text-black"}`}>
-                            Fotogalereya yuklash
-                          </h2>
-                        </div>
-                        <p className={`text-xs ${isDark ? "text-white/60" : "text-zinc-500"} pl-7`}>
-                          Jozibali rasmlardan kamida bittasini tanlang
-                        </p>
-                      </div>
-
-                      {error && (
-                        <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-3 text-xs text-red-400 text-center font-bold">
-                          {error}
-                        </div>
-                      )}
-
-                      {/* Mock Image Grid */}
-                      <div className="grid grid-cols-3 gap-2">
-                        {[
-                          "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=200&q=80",
-                          "https://images.unsplash.com/photo-1519167758481-83f550bb49b3?w=200&q=80",
-                          "https://images.unsplash.com/photo-1552566626-52f8b828add9?w=200&q=80",
-                          "https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=200&q=80",
-                          "https://images.unsplash.com/photo-1464366400600-7168b8af9bc3?w=200&q=80",
-                          "https://images.unsplash.com/photo-1544025162-d76694265947?w=200&q=80"
-                        ].map((imgUrl, i) => {
-                          const isSelected = venueImages.includes(imgUrl);
-                          return (
-                            <button
-                              key={i}
-                              type="button"
-                              onClick={() => {
-                                if (isSelected) {
-                                  setVenueImages(venueImages.filter(url => url !== imgUrl));
-                                } else {
-                                  setVenueImages([...venueImages, imgUrl]);
-                                }
-                              }}
-                              className={`aspect-square rounded-xl overflow-hidden relative border-2 transition-all cursor-pointer ${
-                                isSelected
-                                  ? "border-[#FF5A00] scale-95"
-                                  : "border-transparent opacity-60 hover:opacity-100"
-                              }`}
-                            >
-                              <img src={imgUrl} alt="Mock Venue" className="w-full h-full object-cover" />
-                              {isSelected && (
-                                <div className="absolute inset-0 bg-[#FF5A00]/25 flex items-center justify-center">
-                                  <div className="bg-[#FF5A00] rounded-full p-1 text-white">
-                                    <Check className="h-3 w-3" />
-                                  </div>
-                                </div>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleNextStep}
-                      className={`w-full py-3.5 rounded-[20px] font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                        venueImages.length > 0
-                          ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer hover:bg-[#E04F00]"
-                          : isDark
-                            ? "bg-white/10 text-white/30 cursor-not-allowed"
-                            : "bg-[#FF5A00]/20 text-[#FF5A00]/45 cursor-not-allowed"
-                      }`}
-                    >
-                      Keyingisi
-                    </button>
-                  </div>
-                )}
 
                 {/* Step 6: Phone and Password Signup Credentials */}
                 {step === 6 && (
@@ -3481,7 +2611,7 @@ export default function LoginPage() {
                           </h2>
                         </div>
                         <p className={`text-xs ${isDark ? "text-white/60" : "text-zinc-500"} pl-7`}>
-                          Tizimga kirish uchun telefon raqamingizni kiriting
+                          Ismingiz va tizimga kirish uchun telefon raqamingiz
                         </p>
                       </div>
 
@@ -3492,6 +2622,14 @@ export default function LoginPage() {
                       )}
 
                       <div className="space-y-4 text-left">
+                        <input
+                          value={fullName}
+                          onChange={(e) => setFullName(e.target.value)}
+                          placeholder="Ism va familiyangiz"
+                          className={`w-full px-4 py-3.5 rounded-2xl border transition-all outline-none text-sm font-bold ${
+                            isDark ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]" : "bg-white border-zinc-200 text-black focus:border-[#FF5A00]"
+                          }`}
+                        />
                         {/* Phone Input Box */}
                         <div className={`flex items-center gap-3.5 px-4 py-3.5 rounded-2xl border transition-all ${
                           isDark 
@@ -3592,121 +2730,18 @@ export default function LoginPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          if (password.length < 6) {
-                            setError("Parol kamida 6 ta belgidan iborat bo'lishi kerak!");
-                            return;
-                          }
                           setError("");
                           handleNextStep();
                         }}
                         className={`w-full py-4 rounded-full font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                          password.trim().length >= 6
+                          password.trim().length >= 8 && !loading
                             ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer hover:bg-[#E04F00]"
                             : isDark
                               ? "bg-white/10 text-white/30 cursor-not-allowed"
                               : "bg-[#FF5A00]/20 text-[#FF5A00]/45 cursor-not-allowed"
                         }`}
                       >
-                        Parolni tasdiqlash
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* Step 7: SMS Verification / OTP */}
-                {step === 7 && (
-                  <div className="space-y-4 flex-1 flex flex-col justify-between animate-scale-up">
-                    <div className="space-y-4">
-                      <div className="text-left space-y-1.5">
-                        <div className="flex items-center gap-1.5 -ml-2">
-                          <button
-                            type="button"
-                            onClick={handleBackStep}
-                            className="p-1 rounded-lg transition-colors cursor-pointer text-zinc-950 dark:text-white hover:opacity-75"
-                          >
-                            <ChevronLeft className="h-7 w-7 stroke-[2.5px]" />
-                          </button>
-                          <h2 className={`text-2xl font-extrabold ${isDark ? "text-white" : "text-black"}`}>Tasdiqlash kodi</h2>
-                        </div>
-                        <p className={`text-xs ${isDark ? "text-white/60" : "text-zinc-500"} pl-7`}>
-                          +998 {formatPhone(phone)} raqamiga yuborilgan 6 xonali tasdiqlash kodini kiriting
-                        </p>
-                      </div>
-
-                      {error && (
-                        <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-3 text-xs text-red-400 text-center font-bold">
-                          {error}
-                        </div>
-                      )}
-
-                      <div className="space-y-4 text-left">
-                        <input
-                          type="text"
-                          maxLength={6}
-                          value={otp.join("")}
-                          onChange={(e) => {
-                            const val = e.target.value.replace(/\D/g, "").slice(0, 6);
-                            const newOtp = ["", "", "", "", "", ""];
-                            for (let i = 0; i < val.length; i++) {
-                              newOtp[i] = val[i];
-                            }
-                            setOtp(newOtp);
-                          }}
-                          placeholder="000000"
-                          className={`w-full px-4 py-3.5 rounded-2xl border text-center transition-all outline-none ${
-                            isDark
-                              ? "bg-[#2C2C2E]/60 border-white/10 text-white focus:border-[#FF5A00]"
-                              : "bg-white border-zinc-200 text-black focus:border-[#FF5A00]"
-                          } text-sm font-bold tracking-[0.5em]`}
-                        />
-                      </div>
-
-                      <div className="text-center">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            showToast("Tasdiqlash kodi qayta yuborildi!");
-                            setOtp(["", "", "", "", "", ""]);
-                          }}
-                          className="text-xs font-bold text-[#FF5A00] hover:text-[#E04F00] transition-colors"
-                        >
-                          Kod qayta yuborilsinmi?
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      {/* Next Button */}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (otp.some((d) => d === "")) {
-                            setError("Tasdiqlash kodini to'liq kiriting!");
-                            return;
-                          }
-                          setError("");
-                          handleOtpConfirm();
-                        }}
-                        className={`w-full py-4 rounded-full font-bold text-sm tracking-wide transition-all active:scale-98 shadow-lg ${
-                          !otp.some((d) => d === "")
-                            ? "bg-[#FF5A00] text-white shadow-[#FF5A00]/25 cursor-pointer hover:bg-[#E04F00]"
-                            : isDark
-                              ? "bg-white/10 text-white/30 cursor-not-allowed"
-                              : "bg-[#FF5A00]/20 text-[#FF5A00]/45 cursor-not-allowed"
-                        }`}
-                        disabled={loading}
-                      >
-                        {loading ? (
-                          <span className="flex items-center justify-center gap-1.5">
-                            <svg className="animate-spin h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                            </svg>
-                            Tekshirilmoqda...
-                          </span>
-                        ) : (
-                          "Tasdiqlash"
-                        )}
+                        {loading ? "Ro'yxatdan o'tkazilmoqda..." : "Ro'yxatdan o'tish"}
                       </button>
                     </div>
                   </div>
@@ -3743,14 +2778,14 @@ export default function LoginPage() {
                         </div>
                         <div className="flex justify-between items-center text-xs">
                           <span className="opacity-60">Manzil:</span>
-                          <span className="font-bold">{reg}, {dist}</span>
+                          <span className="font-bold">{reg}, {dist}, {partnerStreet} {partnerHouse}</span>
                         </div>
                         <div className="flex justify-between items-center text-xs">
                           <span className="opacity-60">Sig'imi:</span>
                           <span className="font-bold">{venueCapacity} kishi</span>
                         </div>
                         <div className="flex justify-between items-center text-xs">
-                          <span className="opacity-60">Narxi (bir kishi):</span>
+                          <span className="opacity-60">Narxi:</span>
                           <span className="font-bold text-[#FF5A00]">{Number(venuePrice).toLocaleString("uz-UZ")} UZS dan</span>
                         </div>
                         <div className="flex justify-between items-center text-xs">
@@ -3761,7 +2796,7 @@ export default function LoginPage() {
                     </div>
 
                     <button
-                      onClick={handleCompletePartnerRegistration}
+                      onClick={() => router.push("/admin")}
                       className="w-full py-4 flex items-center justify-center gap-2 rounded-[20px] bg-[#FF5A00] hover:bg-[#E04F00] text-white font-bold text-sm shadow-lg hover:shadow-primary/20 transition-all mt-6 cursor-pointer"
                     >
                       Admin panelga o'tish <ArrowRight className="h-4 w-4" />

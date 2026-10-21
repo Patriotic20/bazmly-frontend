@@ -1,12 +1,10 @@
-# Node 22 is stated here rather than left to the builder. Next 16 requires
-# >=20.9.0, and a builder that guesses 18 fails `next build` with nothing wrong
-# in the code — which is exactly what happened before this file existed.
+# Dependencies resolve from package.json + package-lock.json in their own cached
+# layer, so editing application code does not invalidate the install. Same shape
+# as the backend's Dockerfile.
 FROM node:22-alpine AS deps
 
 WORKDIR /app
 
-# Dependencies resolve from package.json + package-lock.json in their own cached
-# layer, so editing application code does not invalidate the install.
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -21,9 +19,9 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
 # NEXT_PUBLIC_* is inlined into the client bundle at build time, not read at
-# runtime — an image built with the wrong API URL cannot be fixed by restarting
-# it with the right one. Railway passes service variables in as build args, so
-# this must be declared to receive one.
+# runtime -- an image built with the wrong API URL cannot be fixed by restarting
+# it with the right one, which is why this is an ARG and not just an env var on
+# the service.
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 
@@ -34,15 +32,13 @@ FROM node:22-alpine AS runner
 
 WORKDIR /app
 
-# PORT is a default, not a fixture: Railway overrides it with the port it
-# assigns, and Next's standalone server reads it from the environment.
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0
 
-# `node` already exists in the base image at uid/gid 1000, matching the
-# backend's own non-root user.
+# `node` already exists in the base image at uid/gid 1000, matching the backend's
+# own non-root user.
 USER node
 
 # The standalone build carries its own minimal server and only the node_modules

@@ -31,22 +31,12 @@ The backend has to be running, or every screen falls back to its error state.
 
 ## Deploying to Railway
 
-Built from the [`Dockerfile`](Dockerfile), which Railway uses in preference to
-its own builder.
+Built by Nixpacks from [`railway.json`](railway.json); there is no Dockerfile.
 
 Set `NEXT_PUBLIC_API_URL` to the backend's public URL, ending in `/api`. It is
 inlined at **build** time, so changing it needs a redeploy, not a restart — and
 the backend's `APP_CONFIG__CORS__ORIGINS` has to name this app's domain back, or
 every request from the page fails while `curl` keeps working.
-
-### Node version
-
-Next 16 requires Node `>=20.9.0`, and a builder that guesses 18 fails
-`next build` with nothing wrong in the code — which is what happened before the
-Dockerfile existed. The image now states `node:22-alpine` outright.
-
-`engines.node` in `package.json` and [`.nvmrc`](.nvmrc) stay anyway: they are
-what tells a contributor's local toolchain the same thing.
 
 ## Talking to the API
 
