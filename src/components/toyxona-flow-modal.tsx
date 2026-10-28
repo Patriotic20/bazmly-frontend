@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { X, ChevronLeft, Check, CheckCircle, Loader2, Sparkles } from "lucide-react";
+import { X, ChevronLeft, ChevronRight, CalendarDays, Check, CheckCircle, Loader2, Sparkles } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { useAuth } from "@/contexts/AuthContext";
 import { PhoneInput } from "@/components/phone-input";
@@ -16,9 +16,16 @@ import {
   VenueGuestTierRead,
   VenueServiceRead,
 } from "@/lib/api";
-import { formatDate, formatMoney, formatTime } from "@/lib/format";
-import { addHours, slotsFor, upcomingDates, weekdayOf } from "@/lib/venue-hours";
+import { formatDate, formatMoney, formatTime, parseApiDate, toApiDate } from "@/lib/format";
+import { addHours, endTimes, minutesBetween, slotsFor, startTimes, upcomingDates, weekOf, weekdayOf } from "@/lib/venue-hours";
 import { DateCalendar } from "@/components/date-calendar";
+
+/** `YYYY-MM-DD` moved by `days`. */
+function addDays(isoDate: string, days: number): string {
+  const date = parseApiDate(isoDate);
+  date.setDate(date.getDate() + days);
+  return toApiDate(date);
+}
 
 interface ToyxonaFlowModalProps {
   isOpen: boolean;
@@ -27,8 +34,12 @@ interface ToyxonaFlowModalProps {
   theme?: string;
 }
 
-/** A hall event runs most of a day; the slots offered are start times it fits. */
-const EVENT_HOURS = 5;
+/** The shortest event a hall takes, and the end offered first after a start. */
+const MIN_EVENT_HOURS = 2;
+const DEFAULT_EVENT_HOURS = 5;
+/** Start times are offered every half hour. */
+const SLOT_MINUTES = 30;
+const WEEKDAY_SHORT = ["Dush", "Sesh", "Chor", "Pay", "Jum", "Shan", "Yak"];
 /** A to'yxona is booked months ahead; a year is as far as the calendar goes. */
 const BOOKABLE_DAYS = 365;
 
@@ -64,16 +75,49 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
   const [firstDate] = upcomingDates(venue.min_advance_booking_days, 1);
   const [lastDate] = upcomingDates(venue.min_advance_booking_days + BOOKABLE_DAYS - 1, 1);
   const isUnavailable = (date: string) =>
-    blocked.has(date) || slotsFor(detail.working_hours, weekdayOf(date), EVENT_HOURS).length === 0;
+    date < firstDate ||
+    date > lastDate ||
+    blocked.has(date) ||
+    slotsFor(detail.working_hours, weekdayOf(date), MIN_EVENT_HOURS, SLOT_MINUTES).length === 0;
   const [pickedDate, setPickedDate] = useState("");
   const [pickedTime, setPickedTime] = useState("");
   const selectedDate = pickedDate && !isUnavailable(pickedDate) ? pickedDate : "";
-  const times = selectedDate ? slotsFor(detail.working_hours, weekdayOf(selectedDate), EVENT_HOURS) : [];
+  const times = selectedDate ? slotsFor(detail.working_hours, weekdayOf(selectedDate), MIN_EVENT_HOURS, SLOT_MINUTES) : [];
   const selectedTime = times.includes(pickedTime) ? pickedTime : "";
+  const endsFor = (start: string) =>
+    selectedDate ? endTimes(detail.working_hours, weekdayOf(selectedDate), start, MIN_EVENT_HOURS, SLOT_MINUTES) : [];
+  const ends = selectedTime ? endsFor(selectedTime) : [];
+  const [pickedEnd, setPickedEnd] = useState("");
+  const selectedEnd = ends.includes(pickedEnd) ? pickedEnd : "";
+  const durationText = (start: string, end: string) => {
+    const hours = minutesBetween(start, end) / 60;
+    return `${Number.isInteger(hours) ? hours : hours.toFixed(1).replace(".", ",")} soat`;
+  };
+  const chooseStart = (start: string) => {
+    setPickedTime(start);
+    // A typical wedding length is offered straight away; the end stays editable.
+    const options = endsFor(start);
+    const usual = addHours(start, DEFAULT_EVENT_HOURS);
+    setPickedEnd(options.includes(usual) ? usual : (options[options.length - 1] ?? ""));
+  };
+  // The strip shows one week — this one until another is picked from the calendar.
+  const [weekAnchor, setWeekAnchor] = useState(() => toApiDate(new Date()));
+  const week = weekOf(weekAnchor);
+  const [showCalendar, setShowCalendar] = useState(false);
+  // Before a day is picked the times are shown greyed, from the week's first open day.
+  const timesDay = selectedDate || week.find((d) => !isUnavailable(d)) || "";
+  const timeStrip = timesDay ? startTimes(detail.working_hours, weekdayOf(timesDay), MIN_EVENT_HOURS, SLOT_MINUTES) : [];
 
-  const [tierId, setTierId] = useState<number | null>(tiers[0]?.id ?? null);
-  const tier = tiers.find((t) => t.id === tierId) ?? null;
-  const [guests, setGuests] = useState(tiers[0]?.min_guests ?? 0);
+  // The guest count is typed; the band follows from it rather than being picked.
+  const minGuests = tiers.length ? Math.min(...tiers.map((t) => t.min_guests)) : 0;
+  const maxGuests = tiers.some((t) => t.max_guests === null)
+    ? (venue.capacity_max ?? Math.max(...tiers.map((t) => t.min_guests)) + 1000)
+    : Math.max(0, ...tiers.map((t) => t.max_guests ?? 0));
+  const [guestsText, setGuestsText] = useState(minGuests ? String(minGuests) : "");
+  const guests = Number(guestsText) || 0;
+  const tier =
+    tiers.find((t) => guests >= t.min_guests && (t.max_guests === null || guests <= t.max_guests)) ?? null;
+  const guestsInRange = guests >= minGuests && guests <= maxGuests && tier !== null;
 
   const [chosenServices, setChosenServices] = useState<Set<number>>(new Set());
   const [fullName, setFullName] = useState(user ? `${user.first_name} ${user.last_name}`.trim() : "");
@@ -94,6 +138,15 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
 
   useEffect(() => {
     if (!isOpen) return;
+    const days = weekOf(weekAnchor);
+    venueService
+      .getAvailability(venue.id, days[0], days[6])
+      .then((res) => setBlocked((prev) => new Set([...prev, ...res.dates])))
+      .catch(() => {});
+  }, [isOpen, venue.id, weekAnchor]);
+
+  useEffect(() => {
+    if (!isOpen) return;
     venueService
       .getServices(venue.id, venue.venue_group_id)
       .then((list) => setServices(list.filter((s) => s.is_active)))
@@ -108,11 +161,10 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
 
   if (!isOpen) return null;
 
-  const chooseTier = (next: VenueGuestTierRead) => {
-    setTierId(next.id);
-    setGuests(next.min_guests);
-  };
-  const maxGuests = tier?.max_guests ?? venue.capacity_max ?? (tier ? tier.min_guests + 500 : 0);
+  const setGuests = (value: number) => setGuestsText(String(Math.min(maxGuests, Math.max(minGuests, value))));
+  const guestPresets = [100, 200, 300, 500, 800].filter((n) => n >= minGuests && n <= maxGuests);
+  // The table spreads are what a guest count actually costs per head.
+  const perGuestServices = services.filter((s) => s.price_unit === "per_guest");
 
   const pickedServices = services.filter((s) => chosenServices.has(s.id));
   const hallPrice = tier ? Number(tier.base_price) : 0;
@@ -130,14 +182,14 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
       router.push("/login");
       return;
     }
-    if (!tier || !selectedDate || !selectedTime) return;
+    if (!tier || !selectedDate || !selectedTime || !selectedEnd) return;
     setSubmitting(true);
     try {
       const result = await bookingService.bookHall({
         venue_id: venue.id,
         booking_date: selectedDate,
         start_time: `${selectedTime}:00`,
-        end_time: `${addHours(selectedTime, EVENT_HOURS)}:00`,
+        end_time: `${selectedEnd}:00`,
         guests_count: guests,
         contact_name: fullName.trim(),
         contact_phone: toE164(phone) ?? "",
@@ -174,6 +226,14 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
           ? "bg-[#382218] text-white/40 cursor-not-allowed"
           : "bg-[#FFD6BF] text-white cursor-not-allowed"
     }`;
+  const timeChip = (selected: boolean, enabled: boolean) =>
+    `py-2.5 px-4 rounded-xl flex items-center justify-center gap-1 shrink-0 transition-all text-sm font-bold ${
+      selected
+        ? "bg-[#FF5A00] text-white shadow-md shadow-[#FF5A00]/25 cursor-pointer"
+        : enabled
+          ? `${surface} text-[#FF5A00] cursor-pointer`
+          : `${isDark ? "bg-[#2A2A2A]/50" : "bg-[#F5F5F7]/60"} text-zinc-400/50 cursor-not-allowed`
+    }`;
   const footer = `p-4 border-t shrink-0 z-20 ${isDark ? "bg-[#1E1E1E] border-white/5" : "bg-white border-zinc-100"}`;
   const row = (label: string, value: React.ReactNode, key?: string | number) => (
     <div key={key ?? label} className="flex justify-between items-center gap-3 text-xs">
@@ -191,6 +251,33 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
         <div className="fixed top-6 left-1/2 transform -translate-x-1/2 z-[80] px-4 py-2 rounded-xl bg-zinc-900/90 text-white text-xs font-semibold shadow-xl flex items-center gap-2 border border-white/10 max-w-xs">
           <CheckCircle className="w-4 h-4 text-[#FF5A00] shrink-0" />
           <span>{toast}</span>
+        </div>
+      )}
+
+      {showCalendar && (
+        <div className="fixed inset-0 z-[80] bg-black/50 flex items-end justify-center animate-fade-in">
+          <div className="absolute inset-0" onClick={() => setShowCalendar(false)} />
+          <div className={`w-full max-w-md rounded-t-[28px] p-4 pb-8 z-10 relative ${isDark ? "bg-[#1E1E1E] text-white" : "bg-white text-zinc-900"}`}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-bold">To&apos;y sanasini tanlang</h3>
+              <button type="button" onClick={() => setShowCalendar(false)} className="p-1 text-zinc-400 cursor-pointer" aria-label="Yopish">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <DateCalendar
+              isDark={isDark}
+              value={selectedDate}
+              onChange={(date) => {
+                setPickedDate(date);
+                setWeekAnchor(date);
+                setShowCalendar(false);
+              }}
+              minDate={firstDate}
+              maxDate={lastDate}
+              isDisabled={isUnavailable}
+              onMonthChange={loadBlocked}
+            />
+          </div>
         </div>
       )}
 
@@ -263,57 +350,125 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto px-4 sm:px-5 py-4 space-y-6 scrollbar-none">
               <div className="space-y-3">
-                <h3 className="text-base font-bold">To&apos;y sanasi</h3>
-                <DateCalendar
-                  isDark={isDark}
-                  value={selectedDate}
-                  onChange={setPickedDate}
-                  minDate={firstDate}
-                  maxDate={lastDate}
-                  isDisabled={isUnavailable}
-                  onMonthChange={loadBlocked}
-                />
+                <div className="flex items-center justify-between">
+                  <h3 className="text-base font-bold">Sanani belgilash</h3>
+                  <div className="flex items-center gap-1">
+                    {(() => {
+                      const prevWeek = addDays(week[0], -7);
+                      const canGoBack = week[0] > firstDate;
+                      return (
+                        <button
+                          type="button"
+                          disabled={!canGoBack}
+                          onClick={() => setWeekAnchor(prevWeek)}
+                          className={`p-1.5 rounded-lg ${canGoBack ? "text-[#FF5A00] cursor-pointer" : "text-zinc-400/40 cursor-not-allowed"}`}
+                          aria-label="Oldingi hafta"
+                        >
+                          <ChevronLeft className="w-4 h-4" />
+                        </button>
+                      );
+                    })()}
+                    <button
+                      type="button"
+                      onClick={() => setWeekAnchor(addDays(week[0], 7))}
+                      disabled={week[6] >= lastDate}
+                      className="p-1.5 rounded-lg text-[#FF5A00] cursor-pointer disabled:text-zinc-400/40"
+                      aria-label="Keyingi hafta"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowCalendar(true)}
+                      className="ml-1 px-2.5 py-1.5 rounded-lg bg-[#FF5A00]/10 text-[#FF5A00] text-xs font-bold flex items-center gap-1 cursor-pointer"
+                      aria-label="Kalendarni ochish"
+                    >
+                      <CalendarDays className="w-4 h-4" />
+                      Kalendar
+                    </button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-7 gap-1.5">
+                  {week.map((date) => {
+                    const isSelected = selectedDate === date;
+                    const disabled = isUnavailable(date);
+                    return (
+                      <button
+                        key={date}
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setPickedDate(date)}
+                        className={`h-[78px] rounded-[16px] flex flex-col items-center justify-center transition-all ${
+                          isSelected
+                            ? "bg-[#FF5A00] text-white shadow-md shadow-[#FF5A00]/25 cursor-pointer"
+                            : disabled
+                              ? `${isDark ? "bg-[#2A2A2A]/50" : "bg-[#F5F5F7]/60"} text-zinc-400/50 cursor-not-allowed`
+                              : `${surface} cursor-pointer`
+                        }`}
+                      >
+                        {isSelected ? <Check className="w-3.5 h-3.5 stroke-[3] mb-0.5" /> : <div className="w-3.5 h-3.5 mb-0.5" />}
+                        <span className={`text-[11px] font-medium leading-none mb-1.5 ${isSelected ? "" : disabled ? "" : "text-[#FF5A00]"}`}>
+                          {WEEKDAY_SHORT[weekdayOf(date)]}
+                        </span>
+                        <span className="text-xl font-bold leading-none">{Number(date.slice(8, 10))}</span>
+                      </button>
+                    );
+                  })}
+                </div>
                 <p className="text-[11px] text-zinc-400">
-                  Chizilgan kunlar band yoki dam olish kuni.
+                  Kulrang kunlar band yoki dam olish kuni.
                   {venue.min_advance_booking_days > 0 && ` Kamida ${venue.min_advance_booking_days} kun oldin bron qilinadi.`}
                 </p>
               </div>
 
               <div className="space-y-3 pt-1">
-                <h3 className="text-base font-bold">To&apos;y qachon boshlanadi?</h3>
-                {!selectedDate ? (
-                  <p className="text-xs font-semibold text-zinc-400">Avval sanani tanlang.</p>
+                <h3 className="text-base font-bold">Vaqtni belgilash</h3>
+                {timeStrip.length === 0 ? (
+                  <p className="text-xs font-semibold text-zinc-400">Bu haftada bo&apos;sh kun yo&apos;q — kalendardan boshqa sanani tanlang.</p>
                 ) : (
                   <>
-                    <div className="grid grid-cols-4 gap-2.5">
-                      {times.map((t) => {
-                        const isSelected = selectedTime === t;
+                    <span className="text-xs font-bold text-zinc-400 block">Boshlanishi</span>
+                    <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+                      {timeStrip.map(({ time, fits }) => {
+                        const enabled = Boolean(selectedDate) && fits;
                         return (
-                          <button
-                            key={t}
-                            type="button"
-                            onClick={() => setPickedTime(t)}
-                            className={`py-2.5 px-2 rounded-full flex items-center justify-center gap-1 transition-all text-xs font-semibold cursor-pointer ${
-                              isSelected ? "bg-[#FF5A00] text-white font-bold shadow-md shadow-[#FF5A00]/25" : surface
-                            }`}
-                          >
-                            {isSelected && <Check className="w-3 h-3 stroke-[3] shrink-0" />}
-                            <span>{t}</span>
+                          <button key={time} type="button" disabled={!enabled} onClick={() => chooseStart(time)} className={timeChip(selectedTime === time, enabled)}>
+                            {selectedTime === time && <Check className="w-3.5 h-3.5 stroke-[3] shrink-0" />}
+                            <span>{time}</span>
                           </button>
                         );
                       })}
                     </div>
+
+                    <span className="text-xs font-bold text-zinc-400 block pt-1">Tugashi</span>
+                    {ends.length === 0 ? (
+                      <p className="text-xs text-zinc-400">{selectedDate ? "Avval boshlanish vaqtini tanlang." : "Avval sanani tanlang."}</p>
+                    ) : (
+                      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
+                        {ends.map((time) => (
+                          <button key={time} type="button" onClick={() => setPickedEnd(time)} className={timeChip(selectedEnd === time, true)}>
+                            {selectedEnd === time && <Check className="w-3.5 h-3.5 stroke-[3] shrink-0" />}
+                            <span>{time}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
                     <p className="text-[11px] text-zinc-400">
-                      {selectedTime
-                        ? `To'y ${selectedTime} da boshlanib, taxminan ${addHours(selectedTime, EVENT_HOURS)} gacha davom etadi.`
-                        : `Tadbir ${EVENT_HOURS} soat davom etadi.`}
+                      {selectedTime && selectedEnd
+                        ? `To'y ${selectedTime} – ${selectedEnd} (${durationText(selectedTime, selectedEnd)}).`
+                        : `Kamida ${MIN_EVENT_HOURS} soat.`}
                     </p>
                   </>
                 )}
               </div>
             </div>
             <div className={footer}>
-              <button disabled={!selectedDate || !selectedTime} onClick={() => setStep(2)} className={primary(Boolean(selectedDate && selectedTime))}>
+              <button
+                disabled={!selectedDate || !selectedTime || !selectedEnd}
+                onClick={() => setStep(2)}
+                className={primary(Boolean(selectedDate && selectedTime && selectedEnd))}
+              >
                 Keyingisi
               </button>
             </div>
@@ -325,55 +480,92 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
           <div className="flex-1 flex flex-col overflow-hidden">
             <div className="flex-1 overflow-y-auto px-4 sm:px-5 py-4 space-y-4 scrollbar-none">
               <div>
-                <h2 className="text-base font-bold tracking-tight">Mehmonlar sonini tanlang</h2>
+                <h2 className="text-base font-bold tracking-tight">Mehmonlar soni</h2>
                 <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-1 leading-relaxed">
-                  Zal narxi mehmonlar soniga qarab belgilanadi.
+                  {tiers.length ? `Zal ${minGuests} – ${maxGuests} mehmonni qabul qiladi.` : "Bu zal hali narxlarni kiritmagan."}
                 </p>
               </div>
 
-              {tiers.length === 0 ? (
-                <p className="text-xs font-semibold text-zinc-400">Bu zal hali narxlarni kiritmagan.</p>
-              ) : (
-                <div className="space-y-3 pt-1">
-                  {tiers.map((t) => (
-                    <div key={t.id} onClick={() => chooseTier(t)} className={card(tierId === t.id)}>
-                      <div>
-                        <span className="text-sm font-bold block">{tierLabel(t)}</span>
-                        <span className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5 block">
-                          Zal narxi: {formatMoney(t.base_price, venue.currency)}
-                        </span>
-                      </div>
-                      <div className={radio(tierId === t.id)}>{tierId === t.id && <Check className="w-3 h-3 stroke-[3]" />}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {tier && (
-                <div className="flex justify-between items-center pt-2">
-                  <span className="text-sm font-bold">Aniq mehmonlar soni</span>
+              {tiers.length > 0 && (
+                <>
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => setGuests((g) => Math.max(tier.min_guests, g - 10))}
-                      className={`w-9 h-9 rounded-xl font-black ${surface}`}
+                      onClick={() => setGuests(guests - 10)}
+                      className={`w-12 h-12 rounded-2xl text-xl font-black cursor-pointer ${surface}`}
+                      aria-label="10 ta kamaytirish"
                     >
-                      —
+                      −
                     </button>
-                    <span className="text-base font-black w-12 text-center">{guests}</span>
+                    <input
+                      inputMode="numeric"
+                      value={guestsText}
+                      onChange={(e) => setGuestsText(e.target.value.replace(/\D/g, "").slice(0, 5))}
+                      onBlur={() => guestsText && setGuests(guests)}
+                      placeholder={String(minGuests)}
+                      className={`flex-1 min-w-0 h-12 rounded-2xl text-center text-xl font-black outline-none border-2 focus:border-[#FF5A00] ${
+                        isDark ? "bg-[#2A2A2A] border-transparent text-white" : "bg-[#F5F5F7] border-transparent text-zinc-900"
+                      } ${guestsText && !guestsInRange ? "!border-red-400" : ""}`}
+                      aria-label="Mehmonlar soni"
+                    />
                     <button
                       type="button"
-                      onClick={() => setGuests((g) => Math.min(maxGuests, g + 10))}
-                      className={`w-9 h-9 rounded-xl font-black ${surface}`}
+                      onClick={() => setGuests(guests + 10)}
+                      className={`w-12 h-12 rounded-2xl text-xl font-black cursor-pointer ${surface}`}
+                      aria-label="10 ta ko'paytirish"
                     >
                       +
                     </button>
                   </div>
-                </div>
+                  {guestsText && !guestsInRange && (
+                    <p className="text-xs font-semibold text-red-500">
+                      {minGuests} dan {maxGuests} gacha mehmon kiriting.
+                    </p>
+                  )}
+                  {guestPresets.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {guestPresets.map((n) => (
+                        <button
+                          key={n}
+                          type="button"
+                          onClick={() => setGuests(n)}
+                          className={`px-4 py-2 rounded-full text-xs font-bold cursor-pointer transition-all ${
+                            guests === n ? "bg-[#FF5A00] text-white" : surface
+                          }`}
+                        >
+                          {n} kishi
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {guestsInRange && (perGuestServices.length > 0 || (tier && Number(tier.base_price) > 0)) && (
+                    <div className={`rounded-2xl p-4 space-y-2.5 ${isDark ? "bg-white/5" : "bg-zinc-50 border border-zinc-200"}`}>
+                      {perGuestServices.map((s) => (
+                        <div key={s.id} className="flex items-start justify-between gap-3 text-xs">
+                          <span className="min-w-0">
+                            <span className="font-bold block">{s.name}</span>
+                            <span className="text-zinc-400">1 kishi: {formatMoney(s.price, s.currency)}</span>
+                          </span>
+                          <span className="font-black text-[#FF5A00] shrink-0">{formatMoney(Number(s.price) * guests, s.currency)}</span>
+                        </div>
+                      ))}
+                      {tier && Number(tier.base_price) > 0 && (
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold">Zal ijarasi</span>
+                          <span className="font-black">{formatMoney(tier.base_price, venue.currency)}</span>
+                        </div>
+                      )}
+                      {perGuestServices.length > 0 && (
+                        <p className="text-[11px] text-zinc-400">Dasturxon keyingi qadamda tanlanadi; narx {guests} kishi uchun hisoblangan.</p>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </div>
             <div className={footer}>
-              <button disabled={!tier} onClick={() => setStep(3)} className={primary(Boolean(tier))}>
+              <button disabled={!guestsInRange} onClick={() => setStep(3)} className={primary(guestsInRange)}>
                 Keyingisi
               </button>
             </div>
@@ -479,9 +671,9 @@ export default function ToyxonaFlowModal({ isOpen, onClose, detail, theme = "lig
               </div>
 
               <div className={`rounded-2xl border p-4 space-y-2.5 ${isDark ? "border-white/10" : "border-zinc-200"}`}>
-                {row("Sana:", `${formatDate(selectedDate)} • ${selectedTime}–${addHours(selectedTime, EVENT_HOURS)}`)}
+                {row("Sana:", `${formatDate(selectedDate)} • ${selectedTime}–${selectedEnd}`)}
                 {row("Mehmonlar:", `${guests} kishi`)}
-                {row(`Zal ijarasi (${tierLabel(tier)}):`, formatMoney(hallPrice, venue.currency))}
+                {hallPrice > 0 && row(`Zal ijarasi (${tierLabel(tier)}):`, formatMoney(hallPrice, venue.currency))}
                 {pickedServices.map((s) =>
                   row(
                     `${s.name}${s.price_unit === "per_guest" ? ` × ${guests}` : ""}:`,
